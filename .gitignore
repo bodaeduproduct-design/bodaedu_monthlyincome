@@ -1,0 +1,9 @@
+.DS_Store
+__pycache__/
+*.pyc
+
+backend/.venv/
+backend/settlement.db
+
+frontend/node_modules/
+frontend/dist/
