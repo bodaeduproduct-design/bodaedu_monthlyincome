@@ -4,6 +4,7 @@ __pycache__/
 
 backend/.venv/
 backend/settlement.db
+boda.db
 
 frontend/node_modules/
 frontend/dist/

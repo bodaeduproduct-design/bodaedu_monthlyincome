@@ -1,182 +1,170 @@
-from sqlalchemy import Column, Date, DateTime, Float, Integer, String, Text
+from __future__ import annotations
+
+from sqlalchemy import Column, Float, ForeignKey, Integer, String, Text
 
 from .database import Base
 
 
-class DataSync(Base):
-    __tablename__ = "data_syncs"
+class User(Base):
+    __tablename__ = "users"
 
-    id = Column(Integer, primary_key=True, index=True)
-    source_name = Column(String(255), nullable=False)
-    imported_at = Column(DateTime, nullable=False)
-    notes = Column(Text, nullable=False, default="")
-
-
-class TeacherSettlement(Base):
-    __tablename__ = "teacher_settlements"
-
-    id = Column(Integer, primary_key=True, index=True)
-    month = Column(String(7), nullable=False, index=True)
-    teacher_name = Column(String(120), nullable=False, index=True)
-    student_count = Column(Integer, nullable=False, default=0)
-    monthly_total_tuition = Column(Float, nullable=False, default=0.0)
-    monthly_trial_amount = Column(Float, nullable=False, default=0.0)
-    monthly_pretax_amount = Column(Float, nullable=False, default=0.0)
-    session_total_tuition = Column(Float, nullable=False, default=0.0)
-    session_trial_amount = Column(Float, nullable=False, default=0.0)
-    session_pretax_amount = Column(Float, nullable=False, default=0.0)
-    final_pretax_amount = Column(Float, nullable=False, default=0.0)
-    final_aftertax_amount = Column(Float, nullable=False, default=0.0)
-    settlement_date = Column(Date, nullable=True)
+    id = Column(Integer, primary_key=True)
+    email = Column(String, nullable=True, unique=True)
+    name = Column(String, nullable=False)
+    role = Column(String, nullable=False)  # 'teacher' | 'student'
+    created_at = Column(String, nullable=True)
 
 
-class MonthlySettlement(Base):
-    __tablename__ = "monthly_settlements"
+class StudentProfile(Base):
+    __tablename__ = "student_profiles"
 
-    id = Column(Integer, primary_key=True, index=True)
-    month = Column(String(7), nullable=False, index=True)
-    teacher_name = Column(String(120), nullable=False, index=True)
-    student_count = Column(Integer, nullable=False, default=0)
-    fee_rate = Column(Float, nullable=False, default=0.0)
-    first_payment = Column(Float, nullable=False, default=0.0)
-    recurring_payment = Column(Float, nullable=False, default=0.0)
-    special_payment = Column(Float, nullable=False, default=0.0)
-    refund_amount = Column(Float, nullable=False, default=0.0)
-    long_term_payment = Column(Float, nullable=False, default=0.0)
-    long_term_refund = Column(Float, nullable=False, default=0.0)
-    total_tuition = Column(Float, nullable=False, default=0.0)
-    trial_lesson_amount = Column(Float, nullable=False, default=0.0)
-    pretax_amount = Column(Float, nullable=False, default=0.0)
-
-
-class TuitionRecord(Base):
-    __tablename__ = "tuition_records"
-
-    id = Column(Integer, primary_key=True, index=True)
-    sequence_no = Column(Integer, nullable=True)
-    payment_method = Column(String(40), nullable=True)
-    teacher_name = Column(String(120), nullable=False, index=True)
-    phone = Column(String(80), nullable=True)
-    email = Column(String(120), nullable=True)
-    birth_date_text = Column(String(40), nullable=True)
-    gender = Column(String(40), nullable=True)
-    education = Column(String(120), nullable=True)
-    major = Column(String(120), nullable=True)
-    teaching_experience = Column(String(120), nullable=True)
-    subject = Column(String(120), nullable=True)
-    available_grades = Column(Text, nullable=True)
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, unique=True)
+    phone = Column(String, nullable=True)
+    region = Column(String, nullable=True)
+    grade_level = Column(String, nullable=True)
+    parent_name = Column(String, nullable=True)
+    parent_phone = Column(String, nullable=True)
+    created_at = Column(String, nullable=True)
 
 
 class TeacherProfile(Base):
     __tablename__ = "teacher_profiles"
 
-    id = Column(Integer, primary_key=True, index=True)
-    teacher_name = Column(String(120), nullable=False, unique=True, index=True)
-    payment_method = Column(String(40), nullable=True)
-    phone = Column(String(80), nullable=True)
-    email = Column(String(120), nullable=True)
-    birth_date_text = Column(String(40), nullable=True)
-    gender = Column(String(40), nullable=True)
-    education = Column(String(120), nullable=True)
-    major = Column(String(120), nullable=True)
-    teaching_experience = Column(String(120), nullable=True)
-    subject = Column(String(120), nullable=True)
-    available_grades = Column(Text, nullable=True)
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, unique=True)
+    phone = Column(String, nullable=True)
+    birth_date = Column(String, nullable=True)
+    gender = Column(String, nullable=True)
+    education = Column(String, nullable=True)
+    major = Column(String, nullable=True)
+    status = Column(String, nullable=True, default="active")
+    created_at = Column(String, nullable=True)
 
 
-class SessionSettlement(Base):
-    __tablename__ = "session_settlements"
+class Product(Base):
+    __tablename__ = "products"
 
-    id = Column(Integer, primary_key=True, index=True)
-    month = Column(String(7), nullable=False, index=True)
-    teacher_name = Column(String(120), nullable=False, index=True)
-    student_count = Column(Integer, nullable=False, default=0)
-    first_payment_count = Column(Integer, nullable=False, default=0)
-    first_payment_fee = Column(Float, nullable=False, default=0.0)
-    recurring_payment_count = Column(Integer, nullable=False, default=0)
-    recurring_payment_fee = Column(Float, nullable=False, default=0.0)
-    refund_payment_count = Column(Integer, nullable=False, default=0)
-    refund_payment_fee = Column(Float, nullable=False, default=0.0)
-    first_payment_commission = Column(Float, nullable=False, default=0.0)
-    recurring_payment_commission = Column(Float, nullable=False, default=0.0)
-    refund_payment_commission = Column(Float, nullable=False, default=0.0)
-
-
-class SessionCollection(Base):
-    __tablename__ = "session_collections"
-
-    id = Column(Integer, primary_key=True, index=True)
-    month = Column(String(7), nullable=False, index=True)
-    row_number = Column(Integer, nullable=True)
-    payment_method = Column(String(40), nullable=True)
-    teacher_name = Column(String(120), nullable=False, index=True)
-    student_name = Column(String(120), nullable=True)
-    commission_rate = Column(Float, nullable=False, default=0.0)
-    course = Column(String(80), nullable=True)
-    weekly_frequency = Column(String(80), nullable=True)
-    weekdays = Column(String(80), nullable=True)
-    time_text = Column(String(80), nullable=True)
-    product_name = Column(String(120), nullable=True)
-    current_month_sessions = Column(Integer, nullable=False, default=0)
-    current_month_amount = Column(Float, nullable=False, default=0.0)
-    trial_lesson_date = Column(Date, nullable=True)
-    lesson_start_date = Column(Date, nullable=True)
-    lesson_end_date = Column(Date, nullable=True)
+    id = Column(Integer, primary_key=True)
+    name = Column(String, nullable=False)
+    level = Column(String, nullable=False)
+    sessions_per_week = Column(Integer, nullable=False)
+    duration_min = Column(Integer, nullable=False)
+    price_standard = Column(Integer, nullable=True)
+    price_17 = Column(Integer, nullable=True)
+    price_35 = Column(Integer, nullable=True)
+    price_per_session = Column(Integer, nullable=True)
+    billing_unit = Column(String, nullable=False, default="monthly")
+    is_active = Column(Integer, nullable=True, default=1)
+    created_at = Column(String, nullable=True)
 
 
-class StudentRecord(Base):
-    __tablename__ = "student_records"
+class LessonEnrollment(Base):
+    """학생↔선생님 수업(배정·계약). 예전 이름: subscriptions."""
 
-    id = Column(Integer, primary_key=True, index=True)
-    student_name = Column(String(120), nullable=False, unique=True, index=True)
-    parent_name = Column(String(120), nullable=True)
-    contact = Column(String(80), nullable=True)
-    status = Column(String(40), nullable=True)
-    notes = Column(Text, nullable=True)
-    created_at = Column(DateTime, nullable=False)
-    updated_at = Column(DateTime, nullable=False)
+    __tablename__ = "lesson_enrollments"
+
+    id = Column(Integer, primary_key=True)
+    student_id = Column(Integer, ForeignKey("student_profiles.id"), nullable=False)
+    teacher_id = Column(Integer, ForeignKey("teacher_profiles.id"), nullable=False)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=True)
+    price_type = Column(String, nullable=True)
+    payment_method = Column(String, nullable=True)
+    day_1 = Column(Integer, nullable=True)
+    day_2 = Column(Integer, nullable=True)
+    day_3 = Column(Integer, nullable=True)
+    base_commission_rate = Column(Float, nullable=False, default=60.0)
+    current_commission_rate = Column(Float, nullable=False, default=60.0)
+    trial_date = Column(String, nullable=True)
+    trial_month = Column(String, nullable=True)
+    trial_fee = Column(Integer, nullable=True, default=0)
+    start_date = Column(String, nullable=True)
+    end_date = Column(String, nullable=True)
+    next_billing = Column(String, nullable=True)
+    first_month_sessions = Column(Integer, nullable=True)
+    first_month_ratio = Column(Float, nullable=True)
+    first_month_amount = Column(Integer, nullable=True)
+    cancelled_at = Column(String, nullable=True)
+    termination_total_sessions = Column(Integer, nullable=True)
+    termination_remaining = Column(Integer, nullable=True)
+    termination_ratio = Column(Float, nullable=True)
+    created_at = Column(String, nullable=True)
 
 
-class StudentEvent(Base):
-    __tablename__ = "student_events"
+class MonthlyPaymentRecord(Base):
+    """월별 학생 수납 내역. 예전 이름: monthly_lesson_records."""
 
-    id = Column(Integer, primary_key=True, index=True)
-    student_id = Column(Integer, nullable=False, index=True)
-    event_date = Column(Date, nullable=True)
-    event_type = Column(String(40), nullable=False)
-    title = Column(String(160), nullable=False)
-    teacher_name = Column(String(120), nullable=True)
-    payment_method = Column(String(40), nullable=True)
-    weekly_frequency = Column(String(80), nullable=True)
-    weekdays = Column(String(80), nullable=True)
-    time_text = Column(String(80), nullable=True)
-    product_name = Column(String(120), nullable=True)
-    amount = Column(Float, nullable=True)
+    __tablename__ = "monthly_payment_records"
+
+    id = Column(Integer, primary_key=True)
+    billing_month = Column(String, nullable=False)
+    enrollment_id = Column(Integer, ForeignKey("lesson_enrollments.id"), nullable=False)
+    student_id = Column(Integer, ForeignKey("student_profiles.id"), nullable=False)
+    teacher_id = Column(Integer, ForeignKey("teacher_profiles.id"), nullable=False)
+    total_sessions = Column(Integer, nullable=True, default=0)
+    completed_sessions = Column(Integer, nullable=True, default=0)
+    billing_unit = Column(String, nullable=True)
+    base_amount = Column(Integer, nullable=True, default=0)
+    special_amount = Column(Integer, nullable=True, default=0)
+    refund_amount = Column(Integer, nullable=True, default=0)
+    final_amount = Column(Integer, nullable=True, default=0)
+    commission_rate = Column(Float, nullable=True)
+    trial_fee = Column(Integer, nullable=True, default=0)
+    payment_tag = Column(String, nullable=True)
     memo = Column(Text, nullable=True)
-    created_at = Column(DateTime, nullable=False)
-    updated_at = Column(DateTime, nullable=False)
 
 
-class ProductPrice(Base):
-    __tablename__ = "product_prices"
+class Settlement(Base):
+    __tablename__ = "settlements"
 
-    id = Column(Integer, primary_key=True, index=True)
-    table_name = Column(String(80), nullable=False, index=True)
-    product_name = Column(String(120), nullable=False)
-    amount = Column(Float, nullable=False, default=0.0)
+    id = Column(Integer, primary_key=True)
+    billing_month = Column(String, nullable=False)
+    teacher_id = Column(Integer, ForeignKey("teacher_profiles.id"), nullable=False)
+    settlement_type = Column(String, nullable=False)
+    gross_amount = Column(Integer, nullable=False, default=0)
+    trial_fee = Column(Integer, nullable=True, default=0)
+    commission_rate = Column(Float, nullable=False)
+    pre_tax_amount = Column(Integer, nullable=False, default=0)
+    withholding_rate = Column(Float, nullable=True, default=3.30)
+    withholding_amount = Column(Integer, nullable=False, default=0)
+    net_amount = Column(Integer, nullable=False, default=0)
+    status = Column(String, nullable=True, default="pending")
+    settled_at = Column(String, nullable=True)
 
 
-class RateTableRow(Base):
-    __tablename__ = "rate_table_rows"
+class RefundRequest(Base):
+    __tablename__ = "refund_requests"
 
-    id = Column(Integer, primary_key=True, index=True)
-    section_name = Column(String(80), nullable=False, default="")
-    row_type = Column(String(20), nullable=False, default="data")
-    row_label = Column(String(120), nullable=False, default="")
-    value_1 = Column(String(80), nullable=True)
-    value_2 = Column(String(80), nullable=True)
-    value_3 = Column(String(80), nullable=True)
-    value_4 = Column(String(80), nullable=True)
-    value_5 = Column(String(80), nullable=True)
-    value_6 = Column(String(80), nullable=True)
-    row_order = Column(Integer, nullable=False, default=0)
+    id = Column(Integer, primary_key=True)
+    enrollment_id = Column(Integer, ForeignKey("lesson_enrollments.id"), nullable=False)
+    student_id = Column(Integer, ForeignKey("student_profiles.id"), nullable=False)
+    billing_month = Column(String, nullable=False)
+    reason_type = Column(String, nullable=True)
+    reason_detail = Column(Text, nullable=True)
+    total_sessions = Column(Integer, nullable=True)
+    completed_sessions = Column(Integer, nullable=True)
+    progress_rate = Column(Float, nullable=True)
+    paid_amount = Column(Integer, nullable=False)
+    refund_rate = Column(Float, nullable=True)
+    refund_amount = Column(Integer, nullable=False)
+    status = Column(String, nullable=True, default="pending")
+    requested_at = Column(String, nullable=True)
+    approved_at = Column(String, nullable=True)
+    completed_at = Column(String, nullable=True)
+
+
+class CommissionRateHistory(Base):
+    __tablename__ = "commission_rate_history"
+
+    id = Column(Integer, primary_key=True)
+    enrollment_id = Column(Integer, ForeignKey("lesson_enrollments.id"), nullable=False)
+    previous_rate = Column(Float, nullable=False)
+    new_rate = Column(Float, nullable=False)
+    changed_month = Column(String, nullable=False)
+    reason = Column(Text, nullable=True)
+    created_at = Column(String, nullable=True)
+
+
+# 코드 호환용 별칭 (점진 제거)
+Subscription = LessonEnrollment
+MonthlyLessonRecord = MonthlyPaymentRecord

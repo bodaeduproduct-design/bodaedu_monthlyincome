@@ -1,721 +1,1310 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from contextlib import asynccontextmanager
-from datetime import date, datetime
-from pathlib import Path
+from datetime import date
+from typing import Any, Optional
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import text
+from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from .database import Base, SessionLocal, engine, get_db
+from .database import Base, engine, get_db
 from .models import (
-    DataSync,
-    MonthlySettlement,
-    ProductPrice,
-    RateTableRow,
-    SessionCollection,
-    SessionSettlement,
-    StudentEvent,
-    StudentRecord,
+    MonthlyPaymentRecord,
+    Product,
+    RefundRequest,
+    Settlement,
+    StudentProfile,
+    LessonEnrollment,
     TeacherProfile,
-    TeacherSettlement,
-    TuitionRecord,
+    User,
 )
-from .schemas import (
-    ImportResponse,
-    StudentEventCreate,
-    StudentEventUpdate,
-    StudentRecordCreate,
-    StudentRecordUpdate,
-)
-from .workbook_import import PRODUCT_PRICE_TABLES, sync_workbook
-
-SAMPLE_WORKBOOK_PATH = Path(__file__).resolve().parents[2] / "sheet.xlsx"
+from .db_schema_migrate import apply_table_renames
+from .billing_sync import sync_all_trial_enrollments
+from .enrollment_billing import resolve_next_billing, sync_all_next_billing
+from .settlement_sync import sync_settlements_from_payments
+from .payment_record_sync import sync_monthly_payment_records_from_enrollments
+from .schema_registry import get_all_schemas, list_table_names
+from .registration import TRIAL_FEE_AMOUNT, list_register_options, register_enrollment, register_user
+from .table_admin import build_tables_overview, create_row, delete_row, get_row, list_rows, update_row
 
 
-def _serialize_date(value):
-    return value.isoformat() if value else None
+class AdminRowPayload(BaseModel):
+    values: dict[str, Any]
 
 
-def _parse_month(value: str | None) -> tuple[int, int] | None:
-    if not value:
-        return None
+class RegisterUserPayload(BaseModel):
+    role: str
+    name: str
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    region: Optional[str] = None
+    grade_level: Optional[str] = None
+    parent_name: Optional[str] = None
+    parent_phone: Optional[str] = None
+    birth_date: Optional[str] = None
+    gender: Optional[str] = None
+    education: Optional[str] = None
+    major: Optional[str] = None
+    status: Optional[str] = None
+
+
+class RegisterEnrollmentPayload(BaseModel):
+    student_id: int
+    teacher_id: int
+    product_id: int
+    trial_date: Optional[str] = None
+    trial_month: Optional[str] = None
+    payment_method: Optional[str] = "card"
+    price_type: Optional[str] = None
+    day_1: Optional[int] = None
+    day_2: Optional[int] = None
+    day_3: Optional[int] = None
+    base_commission_rate: Optional[float] = 60.0
+    current_commission_rate: Optional[float] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    next_billing: Optional[str] = None
+
+
+def _safe_int(value: Any) -> int:
     try:
-        year_text, month_text = value.split("-")
-        return int(year_text), int(month_text)
-    except ValueError:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _display_field(value: Any) -> str:
+    if value is None or value == "":
+        return "-"
+    return str(value)
+
+
+def _month_add(billing_month: str, delta: int) -> Optional[str]:
+    try:
+        year_s, month_s = billing_month.split("-")
+        year, month = int(year_s), int(month_s)
+    except (TypeError, ValueError):
         return None
-
-
-def _format_month(year: int, month: int) -> str:
+    month += delta
+    while month > 12:
+        month -= 12
+        year += 1
+    while month < 1:
+        month += 12
+        year -= 1
     return f"{year:04d}-{month:02d}"
 
 
-def _add_months(value: str | None, months: int) -> str | None:
-    parsed = _parse_month(value)
-    if not parsed:
-        return None
-    year, month = parsed
-    total = (year * 12 + (month - 1)) + months
-    target_year = total // 12
-    target_month = total % 12 + 1
-    return _format_month(target_year, target_month)
+def _sum_lesson_revenue(db: Session, billing_month: str) -> int:
+    return _safe_int(
+        db.query(func.coalesce(func.sum(MonthlyPaymentRecord.final_amount), 0))
+        .filter(MonthlyPaymentRecord.billing_month == billing_month)
+        .scalar()
+    )
 
 
-def _month_from_date(value: date | None) -> str | None:
-    if not value:
-        return None
-    return _format_month(value.year, value.month)
+def _sum_settlement_net(db: Session, billing_month: str) -> int:
+    return _safe_int(
+        db.query(func.coalesce(func.sum(Settlement.net_amount), 0))
+        .filter(Settlement.billing_month == billing_month)
+        .scalar()
+    )
 
 
-def _teacher_service_month(row: TeacherSettlement) -> str | None:
-    return row.month
+def _sum_settlement_pre_tax(db: Session, billing_month: str) -> int:
+    return _safe_int(
+        db.query(func.coalesce(func.sum(Settlement.pre_tax_amount), 0))
+        .filter(Settlement.billing_month == billing_month)
+        .scalar()
+    )
 
 
-def _teacher_settlement_month(row: TeacherSettlement) -> str | None:
-    return _month_from_date(row.settlement_date) or _add_months(row.month, 1)
+def _sum_settlement_trial_fee(db: Session, billing_month: str) -> int:
+    return _safe_int(
+        db.query(func.coalesce(func.sum(Settlement.trial_fee), 0))
+        .filter(Settlement.billing_month == billing_month)
+        .scalar()
+    )
 
 
-def _monthly_service_month(row: MonthlySettlement) -> str | None:
-    return row.month
+def _sum_enrollment_trial_fee(db: Session, billing_month: str) -> int:
+    """구독 trial_month 기준 시범비(데이터 등록 직후 정산 행 미반영분 포함)."""
+    return _safe_int(
+        db.query(func.coalesce(func.sum(LessonEnrollment.trial_fee), 0))
+        .filter(LessonEnrollment.trial_month == billing_month)
+        .filter(LessonEnrollment.trial_fee > 0)
+        .scalar()
+    )
 
 
-def _monthly_settlement_month(row: MonthlySettlement) -> str | None:
-    return _add_months(row.month, 1)
+def _sum_lesson_trial_fee(db: Session, billing_month: str) -> int:
+    return _safe_int(
+        db.query(func.coalesce(func.sum(MonthlyPaymentRecord.trial_fee), 0))
+        .filter(MonthlyPaymentRecord.billing_month == billing_month)
+        .scalar()
+    )
 
 
-def _session_service_month(row: SessionSettlement) -> str | None:
-    return row.month
+def _sum_trial_fee_for_month(db: Session, billing_month: str) -> int:
+    """해당 월 시범수업비 — 구독(선생님 지급 기준) 우선, 없으면 settlements."""
+    from_sub = _sum_enrollment_trial_fee(db, billing_month)
+    if from_sub > 0:
+        return from_sub
+    return _sum_settlement_trial_fee(db, billing_month)
 
 
-def _session_settlement_month(row: SessionSettlement) -> str | None:
-    return row.month
+def _lesson_revenue_split(db: Session, billing_month: str) -> dict[str, int]:
+    rows = (
+        db.query(
+            MonthlyPaymentRecord.billing_unit,
+            func.coalesce(func.sum(MonthlyPaymentRecord.final_amount), 0),
+        )
+        .filter(MonthlyPaymentRecord.billing_month == billing_month)
+        .group_by(MonthlyPaymentRecord.billing_unit)
+        .all()
+    )
+    monthly = 0
+    per_session = 0
+    for unit, amount in rows:
+        if unit == "monthly":
+            monthly = _safe_int(amount)
+        elif unit == "per_session":
+            per_session = _safe_int(amount)
+    total = monthly + per_session
+    return {"total": total, "monthly": monthly, "per_session": per_session, "has_lesson_data": total > 0}
 
 
-def _collection_service_month(row: SessionCollection) -> str | None:
-    return row.month
+def _active_counts(db: Session, billing_month: str) -> dict[str, int]:
+    return {
+        "active_student_count": _safe_int(
+            db.query(func.count(func.distinct(MonthlyPaymentRecord.student_id)))
+            .filter(MonthlyPaymentRecord.billing_month == billing_month)
+            .scalar()
+        ),
+        "active_teacher_count": _safe_int(
+            db.query(func.count(func.distinct(MonthlyPaymentRecord.teacher_id)))
+            .filter(MonthlyPaymentRecord.billing_month == billing_month)
+            .scalar()
+        ),
+    }
 
 
-def _collection_settlement_month(row: SessionCollection) -> str | None:
-    return row.month
+def _settlement_gross_split(db: Session, billing_month: str) -> dict[str, int]:
+    rows = (
+        db.query(
+            Settlement.settlement_type,
+            func.coalesce(func.sum(Settlement.gross_amount), 0),
+        )
+        .filter(Settlement.billing_month == billing_month)
+        .group_by(Settlement.settlement_type)
+        .all()
+    )
+    monthly = 0
+    per_session = 0
+    for settlement_type, amount in rows:
+        if settlement_type == "monthly":
+            monthly = _safe_int(amount)
+        elif settlement_type == "per_session":
+            per_session = _safe_int(amount)
+    return {"monthly": monthly, "per_session": per_session, "total": monthly + per_session}
+
+
+def _build_dashboard_for_month(db: Session, billing_month: str) -> dict[str, Any]:
+    lesson = _lesson_revenue_split(db, billing_month)
+    settlement_split = _settlement_gross_split(db, billing_month)
+
+    gross_revenue = lesson["total"]
+    revenue_source = "monthly_payment_records"
+    if not lesson["has_lesson_data"]:
+        gross_revenue = settlement_split["total"]
+        revenue_source = "settlements"
+        monthly_revenue = settlement_split["monthly"]
+        per_session_revenue = settlement_split["per_session"]
+    else:
+        monthly_revenue = lesson["monthly"]
+        per_session_revenue = lesson["per_session"]
+
+    teacher_settlement = _sum_settlement_pre_tax(db, billing_month)
+    trial_fee = _sum_trial_fee_for_month(db, billing_month)
+    # 순매출 = 학생 수납(총매출) - 선생님 정산(세전, 시범수업비 포함) 
+    net_revenue = gross_revenue - teacher_settlement
+
+    prev_month = _month_add(billing_month, -1)
+    prev_gross = 0
+    if prev_month:
+        prev_lesson = _lesson_revenue_split(db, prev_month)
+        prev_gross = prev_lesson["total"] if prev_lesson["has_lesson_data"] else _settlement_gross_split(db, prev_month)["total"]
+
+    revenue_delta = gross_revenue - prev_gross
+    revenue_delta_rate = round((revenue_delta / prev_gross) * 100, 1) if prev_gross else None
+
+    active = _active_counts(db, billing_month)
+
+    return {
+        "billing_month": billing_month,
+        "revenue_source": revenue_source,
+        "gross_revenue": gross_revenue,
+        "monthly_revenue": monthly_revenue,
+        "per_session_revenue": per_session_revenue,
+        "teacher_settlement": teacher_settlement,
+        "trial_fee": trial_fee,
+        "net_revenue": net_revenue,
+        "active_student_count": active["active_student_count"],
+        "active_teacher_count": active["active_teacher_count"],
+        "prev_month": prev_month,
+        "prev_gross_revenue": prev_gross,
+        "revenue_delta": revenue_delta,
+        "revenue_delta_rate": revenue_delta_rate,
+    }
+
+
+def _last_n_months(anchor_month: str, n: int = 6) -> list[str]:
+    months = []
+    cursor = anchor_month
+    for _ in range(n):
+        if not cursor:
+            break
+        months.append(cursor)
+        cursor = _month_add(cursor, -1)
+    return list(reversed(months))
+
+
+def _build_six_month_trends(db: Session, anchor_month: str) -> dict[str, list[dict[str, Any]]]:
+    trend_months = _last_n_months(anchor_month, 6)
+    revenue_trend = []
+    student_trend = []
+    for month in trend_months:
+        lesson = _lesson_revenue_split(db, month)
+        gross = lesson["total"] if lesson["has_lesson_data"] else _settlement_gross_split(db, month)["total"]
+        active = _active_counts(db, month)
+        revenue_trend.append({"month": month, "gross_revenue": gross})
+        student_trend.append({"month": month, "student_count": active["active_student_count"]})
+    return {"revenue_trend_6m": revenue_trend, "student_trend_6m": student_trend}
+
+
+def _payment_methods_for_month(db: Session, billing_month: str) -> list[dict[str, Any]]:
+    rows = (
+        db.query(
+            LessonEnrollment.payment_method,
+            func.coalesce(func.sum(MonthlyPaymentRecord.final_amount), 0),
+        )
+        .join(LessonEnrollment, LessonEnrollment.id == MonthlyPaymentRecord.enrollment_id)
+        .filter(MonthlyPaymentRecord.billing_month == billing_month)
+        .group_by(LessonEnrollment.payment_method)
+        .all()
+    )
+    if rows:
+        return [
+            {"payment_method": method or "미입력", "amount": _safe_int(amount)}
+            for method, amount in sorted(rows, key=lambda item: item[1], reverse=True)
+        ]
+    counts = (
+        db.query(LessonEnrollment.payment_method, func.count(LessonEnrollment.id))
+        .group_by(LessonEnrollment.payment_method)
+        .all()
+    )
+    return [{"payment_method": method or "미입력", "amount": _safe_int(count)} for method, count in counts]
+
+
+def _teacher_name_by_profile_id(db: Session, teacher_profile_id: int) -> str:
+    """
+    문서 기준: settlements.teacher_id는 teacher_profiles.id를 참조하고,
+    teacher_profiles.user_id를 통해 users.name을 찾는다.
+
+    현재 로컬 boda.db에 teacher_profiles가 비어있는 경우도 있어, 그땐 users.id 직접 매칭으로 fallback.
+    """
+    name = (
+        db.query(User.name)
+        .join(TeacherProfile, TeacherProfile.user_id == User.id)
+        .filter(TeacherProfile.id == teacher_profile_id)
+        .scalar()
+    )
+    if name:
+        return name
+    fallback = db.query(User.name).filter(User.id == teacher_profile_id).scalar()
+    return fallback or f"teacher#{teacher_profile_id}"
 
 
 def _ensure_schema() -> None:
+    # boda.db는 이미 테이블이 존재하지만, 로컬 개발 환경에서 누락 시 생성되도록 유지합니다.
+    apply_table_renames(engine)
     Base.metadata.create_all(bind=engine)
-    with engine.begin() as connection:
-        existing_columns = {
-            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(session_collections)").fetchall()
-        }
-        if "trial_lesson_date" not in existing_columns:
-            connection.execute(text("ALTER TABLE session_collections ADD COLUMN trial_lesson_date DATE"))
-        if "lesson_start_date" not in existing_columns:
-            connection.execute(text("ALTER TABLE session_collections ADD COLUMN lesson_start_date DATE"))
-        if "lesson_end_date" not in existing_columns:
-            connection.execute(text("ALTER TABLE session_collections ADD COLUMN lesson_end_date DATE"))
-
-
-def _seed_from_sample_workbook() -> None:
-    if not SAMPLE_WORKBOOK_PATH.exists():
-        return
+    # 수업에만 있고 정산에 없는 시범 데이터 보정
+    from .database import SessionLocal
 
     db = SessionLocal()
     try:
-        has_data = db.query(DataSync).count() > 0
-        needs_resync = db.query(SessionCollection).count() > 0 and db.query(SessionCollection).filter(
-            SessionCollection.trial_lesson_date.isnot(None)
-        ).count() == 0
-        expected_product_prices = {
-            (table_name, product_name, float(amount))
-            for table_name, rows in PRODUCT_PRICE_TABLES
-            for product_name, amount in rows
-        }
-        current_product_prices = {
-            (row.table_name, row.product_name, float(row.amount)) for row in db.query(ProductPrice).all()
-        }
-        product_prices_changed = current_product_prices != expected_product_prices
-        if not has_data or needs_resync or product_prices_changed:
-            sync_workbook(db, workbook_path=SAMPLE_WORKBOOK_PATH, source_name=SAMPLE_WORKBOOK_PATH.name)
+        # 수업 → 월별 수납 레코드 자동 생성(미납=0)
+        sync_monthly_payment_records_from_enrollments(db)
+        # 월별 수납 → 선생님 정산 자동 갱신 (월별/회당)
+        sync_settlements_from_payments(db)
+        sync_all_trial_enrollments(db)
+        sync_all_next_billing(db)
+        db.commit()
     finally:
         db.close()
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(app: FastAPI):
     _ensure_schema()
-    _seed_from_sample_workbook()
     yield
 
 
-app = FastAPI(title="정산 관리 API", lifespan=lifespan)
+app = FastAPI(title="보다수학 정산 (boda.db)", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-def _build_app_data(db: Session) -> dict:
-    _ensure_student_records_from_imported_rows(db)
-    data_sync = db.query(DataSync).order_by(DataSync.imported_at.desc()).first()
-    teacher_settlements = db.query(TeacherSettlement).all()
-    monthly_settlements = db.query(MonthlySettlement).all()
-    tuition_records = db.query(TuitionRecord).order_by(TuitionRecord.teacher_name.asc(), TuitionRecord.id.asc()).all()
-    teacher_profiles = db.query(TeacherProfile).order_by(TeacherProfile.teacher_name.asc()).all()
-    session_settlements = db.query(SessionSettlement).all()
-    session_collections = db.query(SessionCollection).all()
-    student_records = db.query(StudentRecord).order_by(StudentRecord.student_name.asc()).all()
-    student_events = db.query(StudentEvent).order_by(StudentEvent.event_date.asc(), StudentEvent.id.asc()).all()
-    product_prices = db.query(ProductPrice).order_by(ProductPrice.id.asc()).all()
-    rate_table_rows = db.query(RateTableRow).order_by(RateTableRow.row_order.asc()).all()
-
-    teacher_settlement_items = sorted(
-        [
-            {
-                "id": row.id,
-                "service_month": _teacher_service_month(row),
-                "settlement_month": _teacher_settlement_month(row),
-                "teacher_name": row.teacher_name,
-                "student_count": row.student_count,
-                "monthly_total_tuition": row.monthly_total_tuition,
-                "monthly_trial_amount": row.monthly_trial_amount,
-                "monthly_pretax_amount": row.monthly_pretax_amount,
-                "session_total_tuition": row.session_total_tuition,
-                "session_trial_amount": row.session_trial_amount,
-                "session_pretax_amount": row.session_pretax_amount,
-                "final_pretax_amount": row.final_pretax_amount,
-                "final_aftertax_amount": row.final_aftertax_amount,
-                "settlement_date": _serialize_date(row.settlement_date),
-            }
-            for row in teacher_settlements
-        ],
-        key=lambda item: (
-            item["settlement_month"] or "",
-            item["final_aftertax_amount"],
-            item["teacher_name"],
-        ),
-        reverse=True,
-    )
-
-    monthly_settlement_items = sorted(
-        [
-            {
-                "id": row.id,
-                "service_month": _monthly_service_month(row),
-                "settlement_month": _monthly_settlement_month(row),
-                "teacher_name": row.teacher_name,
-                "student_count": row.student_count,
-                "fee_rate": row.fee_rate,
-                "first_payment": row.first_payment,
-                "recurring_payment": row.recurring_payment,
-                "special_payment": row.special_payment,
-                "refund_amount": row.refund_amount,
-                "long_term_payment": row.long_term_payment,
-                "long_term_refund": row.long_term_refund,
-                "total_tuition": row.total_tuition,
-                "trial_lesson_amount": row.trial_lesson_amount,
-                "pretax_amount": row.pretax_amount,
-            }
-            for row in monthly_settlements
-        ],
-        key=lambda item: (
-            item["settlement_month"] or "",
-            item["pretax_amount"],
-            item["teacher_name"],
-        ),
-        reverse=True,
-    )
-
-    session_settlement_items = sorted(
-        [
-            {
-                "id": row.id,
-                "service_month": _session_service_month(row),
-                "settlement_month": _session_settlement_month(row),
-                "teacher_name": row.teacher_name,
-                "student_count": row.student_count,
-                "first_payment_count": row.first_payment_count,
-                "first_payment_fee": row.first_payment_fee,
-                "recurring_payment_count": row.recurring_payment_count,
-                "recurring_payment_fee": row.recurring_payment_fee,
-                "refund_payment_count": row.refund_payment_count,
-                "refund_payment_fee": row.refund_payment_fee,
-                "first_payment_commission": row.first_payment_commission,
-                "recurring_payment_commission": row.recurring_payment_commission,
-                "refund_payment_commission": row.refund_payment_commission,
-            }
-            for row in session_settlements
-        ],
-        key=lambda item: (
-            item["settlement_month"] or "",
-            item["recurring_payment_fee"],
-            item["teacher_name"],
-        ),
-        reverse=True,
-    )
-
-    session_collection_items = sorted(
-        [
-            {
-                "id": row.id,
-                "service_month": _collection_service_month(row),
-                "settlement_month": _collection_settlement_month(row),
-                "row_number": row.row_number,
-                "payment_method": row.payment_method,
-                "teacher_name": row.teacher_name,
-                "student_name": row.student_name,
-                "commission_rate": row.commission_rate,
-                "course": row.course,
-                "weekly_frequency": row.weekly_frequency,
-                "weekdays": row.weekdays,
-                "time_text": row.time_text,
-                "product_name": row.product_name,
-                "current_month_sessions": row.current_month_sessions,
-                "current_month_amount": row.current_month_amount,
-                "trial_lesson_date": _serialize_date(row.trial_lesson_date),
-                "lesson_start_date": _serialize_date(row.lesson_start_date),
-                "lesson_end_date": _serialize_date(row.lesson_end_date),
-            }
-            for row in session_collections
-        ],
-        key=lambda item: (
-            item["settlement_month"] or "",
-            item["current_month_amount"],
-            item["teacher_name"],
-        ),
-        reverse=True,
-    )
-
-    available_months = sorted(
-        {
-            *[row["settlement_month"] for row in teacher_settlement_items if row["settlement_month"]],
-            *[row["settlement_month"] for row in monthly_settlement_items if row["settlement_month"]],
-            *[row["settlement_month"] for row in session_settlement_items if row["settlement_month"]],
-            *[row["settlement_month"] for row in session_collection_items if row["settlement_month"]],
-        },
-        reverse=True,
-    )
-
-    latest_teacher_month = teacher_settlement_items[0]["settlement_month"] if teacher_settlement_items else None
-    latest_monthly_month = monthly_settlement_items[0]["settlement_month"] if monthly_settlement_items else None
-    latest_session_month = session_settlement_items[0]["settlement_month"] if session_settlement_items else None
-    latest_collection_month = session_collection_items[0]["settlement_month"] if session_collection_items else None
-    latest_month = (latest_teacher_month or available_months[0]) if available_months else None
-
-    latest_teacher_settlements = [
-        row for row in teacher_settlement_items if row["settlement_month"] == latest_teacher_month
-    ]
-    latest_monthly_settlements = [
-        row for row in monthly_settlement_items if row["settlement_month"] == latest_monthly_month
-    ]
-    latest_session_collections = [
-        row for row in session_collection_items if row["settlement_month"] == latest_collection_month
-    ]
-
-    payment_method_summary: dict[str, int] = defaultdict(int)
-    for record in tuition_records:
-        payment_method_summary[record.payment_method or "미입력"] += 1
-
-    top_products: dict[str, dict] = defaultdict(lambda: {"total_amount": 0.0, "teacher_names": set()})
-    for row in latest_session_collections:
-        product_name = row["product_name"] or "미지정"
-        top_products[product_name]["total_amount"] += row["current_month_amount"]
-        top_products[product_name]["teacher_names"].add(row["teacher_name"])
-
-    monthly_trend: dict[str, dict] = defaultdict(
-        lambda: {"final_pretax_amount": 0.0, "final_aftertax_amount": 0.0, "teacher_count": 0}
-    )
-    for row in teacher_settlement_items:
-        month_key = row["settlement_month"]
-        if not month_key:
-            continue
-        monthly_trend[month_key]["final_pretax_amount"] += row["final_pretax_amount"]
-        monthly_trend[month_key]["final_aftertax_amount"] += row["final_aftertax_amount"]
-        monthly_trend[month_key]["teacher_count"] += 1
-
-    latest_teacher_map = {row["teacher_name"]: row for row in latest_teacher_settlements}
-    latest_collection_by_teacher: dict[str, float] = defaultdict(float)
-    for row in latest_session_collections:
-        latest_collection_by_teacher[row["teacher_name"]] += row["current_month_amount"]
-
-    manual_events_by_student_id: dict[int, list[StudentEvent]] = defaultdict(list)
-    for event in student_events:
-        manual_events_by_student_id[event.student_id].append(event)
-
-    imported_rows_by_student: dict[str, list[dict]] = defaultdict(list)
-    for row in session_collection_items:
-        if row["student_name"]:
-            imported_rows_by_student[row["student_name"]].append(row)
-
-    student_summaries = []
-    for student in student_records:
-        imported_rows = sorted(
-            imported_rows_by_student.get(student.student_name, []),
-            key=lambda item: (
-                item["lesson_start_date"] or "",
-                item["trial_lesson_date"] or "",
-                item["product_name"] or "",
-            ),
-        )
-        manual_items = manual_events_by_student_id.get(student.id, [])
-
-        trial_dates = [row["trial_lesson_date"] for row in imported_rows if row["trial_lesson_date"]]
-        start_dates = [row["lesson_start_date"] for row in imported_rows if row["lesson_start_date"]]
-        end_dates = [row["lesson_end_date"] for row in imported_rows if row["lesson_end_date"]]
-        teachers = sorted({row["teacher_name"] for row in imported_rows if row["teacher_name"]})
-        payment_methods = sorted({row["payment_method"] for row in imported_rows if row["payment_method"]})
-
-        latest_row = imported_rows[-1] if imported_rows else None
-        active_rows = [row for row in imported_rows if not row["lesson_end_date"]]
-        current_row = active_rows[-1] if active_rows else latest_row
-
-        student_summaries.append(
-            {
-                "id": student.id,
-                "student_name": student.student_name,
-                "parent_name": student.parent_name,
-                "contact": student.contact,
-                "status": student.status or ("수업중" if active_rows else "상태 확인 필요"),
-                "notes": student.notes,
-                "created_at": _serialize_date(student.created_at),
-                "updated_at": _serialize_date(student.updated_at),
-                "teacher_names": teachers,
-                "payment_methods": payment_methods,
-                "first_trial_date": min(trial_dates) if trial_dates else None,
-                "first_start_date": min(start_dates) if start_dates else None,
-                "latest_end_date": max(end_dates) if end_dates else None,
-                "current_teacher_name": current_row["teacher_name"] if current_row else None,
-                "current_product_name": current_row["product_name"] if current_row else None,
-                "current_payment_method": current_row["payment_method"] if current_row else None,
-                "current_schedule": ", ".join(
-                    filter(None, [current_row["weekly_frequency"], current_row["weekdays"], current_row["time_text"]])
-                )
-                if current_row
-                else None,
-                "imported_row_count": len(imported_rows),
-                "manual_event_count": len(manual_items),
-                "imported_rows": imported_rows,
-                "manual_events": [
-                    {
-                        "id": event.id,
-                        "event_date": _serialize_date(event.event_date),
-                        "event_type": event.event_type,
-                        "title": event.title,
-                        "teacher_name": event.teacher_name,
-                        "payment_method": event.payment_method,
-                        "weekly_frequency": event.weekly_frequency,
-                        "weekdays": event.weekdays,
-                        "time_text": event.time_text,
-                        "product_name": event.product_name,
-                        "amount": event.amount,
-                        "memo": event.memo,
-                    }
-                    for event in manual_items
-                ],
-            }
-        )
-
-    return {
-        "meta": {
-            "source_name": data_sync.source_name if data_sync else None,
-            "last_imported_at": _serialize_date(data_sync.imported_at) if data_sync else None,
-            "available_months": available_months,
-            "latest_month": latest_month,
-            "page_latest_months": {
-                "teacher-settlements": latest_teacher_month,
-                "monthly-settlements": latest_monthly_month,
-                "session-settlements": latest_session_month,
-                "session-collections": latest_collection_month,
-            },
-        },
-        "dashboard": {
-            "teacher_count": len({profile.teacher_name for profile in teacher_profiles}),
-            "tuition_record_count": len(tuition_records),
-            "latest_total_pretax_amount": sum(row["final_pretax_amount"] for row in latest_teacher_settlements),
-            "latest_total_aftertax_amount": sum(row["final_aftertax_amount"] for row in latest_teacher_settlements),
-            "latest_monthly_tuition": sum(row["total_tuition"] for row in latest_monthly_settlements),
-            "latest_session_collection_amount": sum(row["current_month_amount"] for row in latest_session_collections),
-            "latest_teacher_month": latest_teacher_month,
-            "latest_monthly_month": latest_monthly_month,
-            "latest_session_month": latest_session_month,
-            "latest_collection_month": latest_collection_month,
-            "payment_method_summary": [
-                {"payment_method": key, "count": count}
-                for key, count in sorted(payment_method_summary.items(), key=lambda item: item[1], reverse=True)
-            ],
-            "monthly_trend": [
-                {"month": month, **values}
-                for month, values in sorted(monthly_trend.items(), key=lambda item: item[0], reverse=True)
-            ],
-            "top_teachers": [
-                {
-                    "teacher_name": row["teacher_name"],
-                    "student_count": row["student_count"],
-                    "final_aftertax_amount": row["final_aftertax_amount"],
-                }
-                for row in latest_teacher_settlements[:8]
-            ],
-            "top_products": [
-                {
-                    "product_name": product_name,
-                    "total_amount": values["total_amount"],
-                    "teacher_count": len(values["teacher_names"]),
-                }
-                for product_name, values in sorted(
-                    top_products.items(),
-                    key=lambda item: item[1]["total_amount"],
-                    reverse=True,
-                )[:8]
-            ],
-        },
-        "teacher_settlements": teacher_settlement_items,
-        "monthly_settlements": monthly_settlement_items,
-        "tuition_records": [
-            {
-                "id": row.id,
-                "sequence_no": row.sequence_no,
-                "payment_method": row.payment_method,
-                "teacher_name": row.teacher_name,
-                "phone": row.phone,
-                "email": row.email,
-                "birth_date_text": row.birth_date_text,
-                "gender": row.gender,
-                "education": row.education,
-                "major": row.major,
-                "teaching_experience": row.teaching_experience,
-                "subject": row.subject,
-                "available_grades": row.available_grades,
-            }
-            for row in tuition_records
-        ],
-        "teacher_profiles": [
-            {
-                "id": row.id,
-                "teacher_name": row.teacher_name,
-                "payment_method": row.payment_method,
-                "phone": row.phone,
-                "email": row.email,
-                "birth_date_text": row.birth_date_text,
-                "gender": row.gender,
-                "education": row.education,
-                "major": row.major,
-                "teaching_experience": row.teaching_experience,
-                "subject": row.subject,
-                "available_grades": row.available_grades,
-                "latest_student_count": latest_teacher_map.get(row.teacher_name)["student_count"]
-                if latest_teacher_map.get(row.teacher_name)
-                else 0,
-                "latest_aftertax_amount": latest_teacher_map.get(row.teacher_name)["final_aftertax_amount"]
-                if latest_teacher_map.get(row.teacher_name)
-                else 0.0,
-                "latest_session_collection_amount": latest_collection_by_teacher.get(row.teacher_name, 0.0),
-            }
-            for row in teacher_profiles
-        ],
-        "students": student_summaries,
-        "session_settlements": session_settlement_items,
-        "session_collections": session_collection_items,
-        "product_prices": [
-            {
-                "id": row.id,
-                "table_name": row.table_name,
-                "product_name": row.product_name,
-                "amount": row.amount,
-            }
-            for row in product_prices
-        ],
-        "rate_table_rows": [
-            {
-                "id": row.id,
-                "section_name": row.section_name,
-                "row_type": row.row_type,
-                "row_label": row.row_label,
-                "values": [row.value_1, row.value_2, row.value_3, row.value_4, row.value_5, row.value_6],
-            }
-            for row in rate_table_rows
-        ],
-    }
-
-
-def _clean_optional_text(value: str | None) -> str | None:
-    if value is None:
-        return None
-    cleaned = value.strip()
-    return cleaned or None
-
-
-def _ensure_student_records_from_imported_rows(db: Session) -> None:
-    existing_names = {row.student_name for row in db.query(StudentRecord).all()}
-    imported_names = {
-        row.student_name for row in db.query(SessionCollection).all() if row.student_name and row.student_name.strip()
-    }
-    missing_names = sorted(imported_names - existing_names)
-    if not missing_names:
-        return
-
-    now = datetime.utcnow()
-    for student_name in missing_names:
-        db.add(
-            StudentRecord(
-                student_name=student_name,
-                parent_name=None,
-                contact=None,
-                status="수업중",
-                notes=None,
-                created_at=now,
-                updated_at=now,
-            )
-        )
-    db.commit()
-
-
 @app.get("/api/health")
-def health_check(db: Session = Depends(get_db)):
+def health():
+    return {"ok": True, "db": "boda.db"}
+
+
+@app.get("/api/dashboard")
+def dashboard(month: Optional[str] = None, db: Session = Depends(get_db)):
+    """조회 월 기준 대시보드 지표 (카드/차트용)."""
+    months_from_lessons = [
+        row[0]
+        for row in db.query(MonthlyPaymentRecord.billing_month)
+        .distinct()
+        .order_by(MonthlyPaymentRecord.billing_month.desc())
+        .all()
+        if row[0]
+    ]
+    months_from_settlements = [
+        row[0]
+        for row in db.query(Settlement.billing_month)
+        .distinct()
+        .order_by(Settlement.billing_month.desc())
+        .all()
+        if row[0]
+    ]
+    months = sorted(set(months_from_lessons) | set(months_from_settlements), reverse=True)
+
+    if not month:
+        if "2026-05" in months:
+            month = "2026-05"
+        else:
+            month = months[0] if months else None
+
+    if not month:
+        raise HTTPException(status_code=404, detail="조회 가능한 월이 없습니다.")
+
+    summary = _build_dashboard_for_month(db, month)
+    trends = _build_six_month_trends(db, month)
     return {
-        "status": "ok",
-        "synced": db.query(DataSync).count() > 0,
+        "available_months": months,
+        "summary": summary,
+        **trends,
     }
+
+
+@app.get("/api/students/payment-summary")
+def students_payment_summary(month: Optional[str] = None, db: Session = Depends(get_db)):
+    """학생 수납 페이지 — 결제수단별 수금(도넛 차트용)."""
+    if not month:
+        month = (
+            db.query(MonthlyPaymentRecord.billing_month)
+            .distinct()
+            .order_by(MonthlyPaymentRecord.billing_month.desc())
+            .limit(1)
+            .scalar()
+        )
+    if not month:
+        return {"billing_month": None, "items": []}
+    return {"billing_month": month, "items": _payment_methods_for_month(db, month)}
 
 
 @app.get("/api/app-data")
-def get_app_data(db: Session = Depends(get_db)):
-    return _build_app_data(db)
+def app_data(db: Session = Depends(get_db)):
+    """
+    프론트 초기 로딩용 통합 데이터.
+    (추후 화면별 엔드포인트로 분리해도, 하위호환을 위해 유지)
+    """
 
+    months_from_settlements = [
+        row[0]
+        for row in db.query(Settlement.billing_month)
+        .distinct()
+        .order_by(Settlement.billing_month.desc())
+        .all()
+        if row[0]
+    ]
+    months_from_lessons = [
+        row[0]
+        for row in db.query(MonthlyPaymentRecord.billing_month)
+        .distinct()
+        .order_by(MonthlyPaymentRecord.billing_month.desc())
+        .all()
+        if row[0]
+    ]
+    months = sorted(set(months_from_lessons) | set(months_from_settlements), reverse=True)
+    latest_month = months[0] if months else None
 
-@app.post("/api/students")
-def create_student(payload: StudentRecordCreate, db: Session = Depends(get_db)):
-    existing = db.query(StudentRecord).filter(StudentRecord.student_name == payload.student_name.strip()).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="이미 존재하는 학생 이름입니다.")
+    teacher_count = db.query(func.count(TeacherProfile.id)).scalar() or 0
+    student_count = db.query(func.count(StudentProfile.id)).scalar() or 0
+    enrollment_count = db.query(func.count(LessonEnrollment.id)).scalar() or 0
 
-    now = datetime.utcnow()
-    student = StudentRecord(
-        student_name=payload.student_name.strip(),
-        parent_name=_clean_optional_text(payload.parent_name),
-        contact=_clean_optional_text(payload.contact),
-        status=_clean_optional_text(payload.status),
-        notes=_clean_optional_text(payload.notes),
-        created_at=now,
-        updated_at=now,
+    # 문서 기준:
+    # - 총매출/월별결제/회당결제: monthly_payment_records.final_amount (billing_unit으로 분기)
+    # - 순수익(지급액): settlements.net_amount
+    # 단, sample DB에서 monthly_payment_records가 비어있을 수 있으므로 settlements로 일부 fallback합니다.
+
+    lesson_exists = (db.query(func.count(MonthlyPaymentRecord.id)).scalar() or 0) if latest_month else 0
+
+    lesson_by_month: dict[str, dict[str, int]] = {}
+    lesson_type_by_month: dict[tuple[str, str], dict[str, int]] = {}
+    payment_method_amounts: dict[str, int] = {}
+
+    if lesson_exists > 0:
+        lesson_by_month = {
+            row[0]: {"gross_amount": _safe_int(row[1]), "trial_fee": _safe_int(row[2])}
+            for row in db.query(
+                MonthlyPaymentRecord.billing_month,
+                func.coalesce(func.sum(MonthlyPaymentRecord.final_amount), 0),
+                func.coalesce(func.sum(MonthlyPaymentRecord.trial_fee), 0),
+            )
+            .group_by(MonthlyPaymentRecord.billing_month)
+            .all()
+            if row[0]
+        }
+
+        lesson_type_by_month = {
+            (row[0], row[1]): {"gross_amount": _safe_int(row[2])}
+            for row in db.query(
+                MonthlyPaymentRecord.billing_month,
+                MonthlyPaymentRecord.billing_unit,
+                func.coalesce(func.sum(MonthlyPaymentRecord.final_amount), 0),
+            )
+            .group_by(MonthlyPaymentRecord.billing_month, MonthlyPaymentRecord.billing_unit)
+            .all()
+            if row[0] and row[1]
+        }
+
+        # 결제수단별 수금(금액): monthly_payment_records의 enrollment_id → subscriptions.payment_method로 join
+        payment_rows = (
+            db.query(
+                LessonEnrollment.payment_method,
+                func.coalesce(func.sum(MonthlyPaymentRecord.final_amount), 0),
+            )
+            .join(LessonEnrollment, LessonEnrollment.id == MonthlyPaymentRecord.enrollment_id)
+            .group_by(LessonEnrollment.payment_method)
+            .all()
+        )
+        for method, amount in payment_rows:
+            payment_method_amounts[method or "미입력"] = _safe_int(amount)
+
+    # settlements 기반(순수익/총수업료/시범수업비) 집계
+    # 문서의 "총매출"은 monthly_payment_records 기준이지만,
+    # sample DB처럼 monthly_payment_records가 비어있을 수 있어 gross 관련 지표는 fallback을 제공합니다.
+    settlement_by_month = {
+        row[0]: {
+            "gross_amount": _safe_int(row[1]),
+            "net_profit": _safe_int(row[2]),
+            "trial_fee": _safe_int(row[3]),
+        }
+        for row in db.query(
+            Settlement.billing_month,
+            func.coalesce(func.sum(Settlement.gross_amount), 0),
+            func.coalesce(func.sum(Settlement.net_amount), 0),
+            func.coalesce(func.sum(Settlement.trial_fee), 0),
+        )
+        .group_by(Settlement.billing_month)
+        .all()
+        if row[0]
+    }
+
+    settlement_type_by_month = {
+        (row[0], row[1]): {"gross_amount": _safe_int(row[2])}
+        for row in db.query(
+            Settlement.billing_month,
+            Settlement.settlement_type,
+            func.coalesce(func.sum(Settlement.gross_amount), 0),
+        )
+        .group_by(Settlement.billing_month, Settlement.settlement_type)
+        .all()
+        if row[0] and row[1]
+    }
+
+    latest_net_profit = settlement_by_month.get(latest_month, {}).get("net_profit") if latest_month else None
+    latest_trial_fee = _sum_trial_fee_for_month(db, latest_month) if latest_month else None
+
+    latest_gross_amount = (
+        lesson_by_month.get(latest_month, {}).get("gross_amount")
+        if latest_month and lesson_exists > 0
+        else settlement_by_month.get(latest_month, {}).get("gross_amount") if latest_month else None
     )
-    db.add(student)
-    db.commit()
-    db.refresh(student)
-    return {"id": student.id}
+    latest_monthly_gross = (
+        lesson_type_by_month.get((latest_month, "monthly"), {}).get("gross_amount")
+        if latest_month and lesson_exists > 0
+        else settlement_type_by_month.get((latest_month, "monthly"), {}).get("gross_amount") if latest_month else None
+    )
+    latest_per_session_gross = (
+        lesson_type_by_month.get((latest_month, "per_session"), {}).get("gross_amount")
+        if latest_month and lesson_exists > 0
+        else settlement_type_by_month.get((latest_month, "per_session"), {}).get("gross_amount") if latest_month else None
+    )
+
+    # 결제수단별 수금/분포
+    if payment_method_amounts:
+        payment_method_summary = [
+            {"payment_method": method, "amount": amount}
+            for method, amount in sorted(payment_method_amounts.items(), key=lambda item: item[1], reverse=True)
+        ]
+    else:
+        payment_method_counts = {
+            (row[0] or "미입력"): _safe_int(row[1])
+            for row in db.query(LessonEnrollment.payment_method, func.count(LessonEnrollment.id)).group_by(LessonEnrollment.payment_method).all()
+        }
+        payment_method_summary = [
+            {"payment_method": method, "amount": amount}
+            for method, amount in sorted(payment_method_counts.items(), key=lambda item: item[1], reverse=True)
+        ]
+
+    revenue_trend = []
+    for month in months:
+        has_lesson_revenue = month in lesson_by_month and lesson_by_month[month].get("gross_amount", 0) > 0
+        revenue_trend.append(
+            {
+                "month": month,
+                "gross_amount": lesson_by_month.get(month, {}).get("gross_amount", 0)
+                if has_lesson_revenue
+                else settlement_by_month.get(month, {}).get("gross_amount", 0),
+                "gross_amount_source": "monthly_payment_records" if has_lesson_revenue else "settlements",
+                "net_profit": settlement_by_month.get(month, {}).get("net_profit", 0),
+                "trial_fee": _sum_trial_fee_for_month(db, month),
+                "monthly_gross_amount": lesson_type_by_month.get((month, "monthly"), {}).get("gross_amount", 0)
+                if has_lesson_revenue
+                else settlement_type_by_month.get((month, "monthly"), {}).get("gross_amount", 0),
+                "per_session_gross_amount": lesson_type_by_month.get((month, "per_session"), {}).get("gross_amount", 0)
+                if has_lesson_revenue
+                else settlement_type_by_month.get((month, "per_session"), {}).get("gross_amount", 0),
+            }
+        )
+
+    default_month = "2026-05" if "2026-05" in months else latest_month
+
+    # 이번달 수업 학생/선생님 수: monthly_payment_records가 없으면 0으로 반환
+    month_active_student_count = 0
+    month_active_teacher_count = 0
+    if latest_month and months_from_lessons:
+        month_active_student_count = (
+            db.query(func.count(func.distinct(MonthlyPaymentRecord.student_id)))
+            .filter(MonthlyPaymentRecord.billing_month == latest_month)
+            .scalar()
+            or 0
+        )
+        month_active_teacher_count = (
+            db.query(func.count(func.distinct(MonthlyPaymentRecord.teacher_id)))
+            .filter(MonthlyPaymentRecord.billing_month == latest_month)
+            .scalar()
+            or 0
+        )
+
+    # 선생님 목록: teacher_profiles가 비어있을 수 있어 users(role='teacher')를 기준으로 생성
+    teachers = []
+    # 문서 기준: teacher_profiles(1:1 users). 다만 샘플 DB가 비어있을 수 있어 users(role='teacher')로 fallback.
+    teacher_profiles = db.query(TeacherProfile).order_by(TeacherProfile.id.asc()).all()
+    if teacher_profiles:
+        for tp in teacher_profiles:
+            user = db.query(User).filter(User.id == tp.user_id).first()
+            teachers.append(
+                {
+                    "teacher_id": tp.id,
+                    "name": _teacher_name_by_profile_id(db, tp.id),
+                    "status": _display_field(tp.status),
+                    "email": _display_field(user.email if user else None),
+                    "phone": _display_field(tp.phone),
+                    "birth_date": _display_field(tp.birth_date),
+                    "gender": _display_field(tp.gender),
+                    "education": _display_field(tp.education),
+                    "major": _display_field(tp.major),
+                }
+            )
+    else:
+        for u in db.query(User).filter(User.role == "teacher").order_by(User.id.asc()).all():
+            teachers.append(
+                {
+                    "teacher_id": u.id,
+                    "name": u.name,
+                    "status": "active",
+                    "email": _display_field(u.email),
+                    "phone": "-",
+                    "birth_date": "-",
+                    "gender": "-",
+                    "education": "-",
+                    "major": "-",
+                }
+            )
+
+    # 최신월 선생님별 지급 요약(한눈에 보기)
+    teacher_settlement_summary = []
+    if latest_month:
+        rows = (
+            db.query(
+                Settlement.teacher_id,
+                func.coalesce(func.sum(Settlement.gross_amount), 0),
+                func.coalesce(func.sum(Settlement.trial_fee), 0),
+                func.coalesce(func.sum(Settlement.net_amount), 0),
+            )
+            .filter(Settlement.billing_month == latest_month)
+            .group_by(Settlement.teacher_id)
+            .all()
+        )
+        for teacher_id, gross_sum, trial_sum, net_sum in rows:
+            name = _teacher_name_by_profile_id(db, teacher_id)
+            teacher_settlement_summary.append(
+                {
+                    "billing_month": latest_month,
+                    "teacher_id": teacher_id,
+                    "teacher_name": name,
+                    "gross_amount": _safe_int(gross_sum),
+                    "trial_fee": _safe_int(trial_sum),
+                    "net_amount": _safe_int(net_sum),
+                }
+            )
+        teacher_settlement_summary.sort(key=lambda item: item["net_amount"], reverse=True)
+
+    return {
+        "meta": {
+            "available_months": months,
+            "latest_month": latest_month,
+            "default_month": default_month,
+            "source_notes": "대시보드 상세 지표는 /api/dashboard?month= 조회 월 기준입니다.",
+        },
+        "dashboard": {
+            "teacher_count": teacher_count,
+            "student_count": student_count,
+            "enrollment_count": enrollment_count,
+            "latest_net_profit": _safe_int(latest_net_profit) if latest_net_profit is not None else None,
+            "latest_gross_amount": _safe_int(latest_gross_amount) if latest_gross_amount is not None else None,
+            "latest_monthly_gross_amount": _safe_int(latest_monthly_gross) if latest_monthly_gross is not None else None,
+            "latest_per_session_gross_amount": _safe_int(latest_per_session_gross) if latest_per_session_gross is not None else None,
+            "latest_trial_fee": _safe_int(latest_trial_fee) if latest_trial_fee is not None else None,
+            "latest_active_student_count": _safe_int(month_active_student_count),
+            "latest_active_teacher_count": _safe_int(month_active_teacher_count),
+            "payment_method_summary": payment_method_summary,
+            "revenue_trend": revenue_trend,
+        },
+        "products": [
+            {
+                "id": p.id,
+                "name": p.name,
+                "billing_unit": p.billing_unit,
+                "price_standard": p.price_standard,
+                "price_17": p.price_17,
+                "price_35": p.price_35,
+                "price_per_session": p.price_per_session,
+                "is_active": bool(p.is_active),
+            }
+            for p in db.query(Product).order_by(Product.id.asc()).all()
+        ],
+        "teachers": teachers,
+        "teacher_settlements": teacher_settlement_summary,
+    }
 
 
-@app.put("/api/students/{student_id}")
-def update_student(student_id: int, payload: StudentRecordUpdate, db: Session = Depends(get_db)):
-    student = db.get(StudentRecord, student_id)
-    if not student:
-        raise HTTPException(status_code=404, detail="학생 정보를 찾을 수 없습니다.")
+@app.get("/api/teachers/settlements")
+def list_teacher_settlements(month: Optional[str] = None, db: Session = Depends(get_db)):
+    """
+    선생님별 정산 목록(한눈에): 지정 월 또는 전체 월.
+    - month 미지정: 월별(teacher_id, billing_month) 단위로 모두 반환
+    - items: settlement_type별 행
+    - aggregated: 선생님별 월별+회당 합산
+    """
+    q = db.query(
+        Settlement.billing_month,
+        Settlement.teacher_id,
+        Settlement.settlement_type,
+        func.coalesce(func.sum(Settlement.gross_amount), 0),
+        func.coalesce(func.sum(Settlement.trial_fee), 0),
+        func.coalesce(func.sum(Settlement.net_amount), 0),
+    )
+    if month:
+        q = q.filter(Settlement.billing_month == month)
+    q = q.group_by(Settlement.billing_month, Settlement.teacher_id, Settlement.settlement_type)
+    rows = q.order_by(Settlement.billing_month.desc(), Settlement.teacher_id.asc()).all()
 
-    name = payload.student_name.strip()
-    duplicate = (
-        db.query(StudentRecord)
-        .filter(StudentRecord.student_name == name, StudentRecord.id != student_id)
+    items = []
+    aggregated_map: dict[tuple[str, int], dict[str, Any]] = {}
+    for billing_month, teacher_id, settlement_type, gross_sum, trial_sum, net_sum in rows:
+        name = _teacher_name_by_profile_id(db, teacher_id)
+        gross_i = _safe_int(gross_sum)
+        trial_i = _safe_int(trial_sum)
+        net_i = _safe_int(net_sum)
+        items.append(
+            {
+                "billing_month": billing_month,
+                "teacher_id": teacher_id,
+                "teacher_name": name,
+                "settlement_type": settlement_type,
+                "gross_amount": gross_i,
+                "trial_fee": trial_i,
+                "net_amount": net_i,
+            }
+        )
+        key = (billing_month, teacher_id)
+        if key not in aggregated_map:
+            aggregated_map[key] = {
+                "billing_month": billing_month,
+                "teacher_id": teacher_id,
+                "teacher_name": name,
+                "gross_amount": 0,
+                "trial_fee": 0,
+                "net_amount": 0,
+                "monthly_net_amount": 0,
+                "per_session_net_amount": 0,
+                "trial_net_amount": 0,
+            }
+        agg = aggregated_map[key]
+        agg["gross_amount"] += gross_i
+        agg["trial_fee"] += trial_i
+        agg["net_amount"] += net_i
+        if settlement_type == "monthly":
+            agg["monthly_net_amount"] += net_i
+        elif settlement_type == "per_session":
+            agg["per_session_net_amount"] += net_i
+        elif settlement_type == "trial":
+            agg["trial_net_amount"] += net_i
+
+    aggregated = sorted(aggregated_map.values(), key=lambda row: row["net_amount"], reverse=True)
+    return {"items": items, "aggregated": aggregated}
+
+
+@app.get("/api/teachers/{teacher_id}/settlements")
+def teacher_settlement_months(teacher_id: int, db: Session = Depends(get_db)):
+    months = [
+        row[0]
+        for row in db.query(Settlement.billing_month)
+        .filter(Settlement.teacher_id == teacher_id)
+        .distinct()
+        .order_by(Settlement.billing_month.desc())
+        .all()
+        if row[0]
+    ]
+    name = _teacher_name_by_profile_id(db, teacher_id)
+    return {"teacher_id": teacher_id, "teacher_name": name, "months": months}
+
+
+@app.get("/api/teachers/{teacher_id}/settlements/{billing_month}")
+def teacher_settlement_detail(teacher_id: int, billing_month: str, db: Session = Depends(get_db)):
+    """
+    선생님 상세 정산 페이지용.\n
+    - settlements(월별결제/회당결제) 합계\n
+    - monthly_payment_records 상세(있을 경우)\n
+    - refund_requests(있을 경우)\n
+    """
+    teacher_name = _teacher_name_by_profile_id(db, teacher_id)
+
+    settlement_lines = (
+        db.query(
+            Settlement.settlement_type,
+            func.coalesce(func.sum(Settlement.gross_amount), 0),
+            func.coalesce(func.sum(Settlement.trial_fee), 0),
+            func.coalesce(func.sum(Settlement.net_amount), 0),
+        )
+        .filter(Settlement.teacher_id == teacher_id, Settlement.billing_month == billing_month)
+        .group_by(Settlement.settlement_type)
+        .all()
+    )
+    settlement_summary = [
+        {
+            "settlement_type": settlement_type,
+            "gross_amount": _safe_int(gross_sum),
+            "trial_fee": _safe_int(trial_sum),
+            "net_amount": _safe_int(net_sum),
+        }
+        for settlement_type, gross_sum, trial_sum, net_sum in settlement_lines
+    ]
+
+    # 수업 레코드 상세 (현재 샘플 DB는 0건일 수 있음)
+    lesson_rows = (
+        db.query(MonthlyPaymentRecord)
+        .filter(MonthlyPaymentRecord.teacher_id == teacher_id, MonthlyPaymentRecord.billing_month == billing_month)
+        .order_by(MonthlyPaymentRecord.id.asc())
+        .all()
+    )
+    lesson_items = []
+    for row in lesson_rows:
+        student_name = (
+            db.query(User.name)
+            .join(StudentProfile, StudentProfile.user_id == User.id)
+            .filter(StudentProfile.id == row.student_id)
+            .scalar()
+        )
+        product_name = (
+            db.query(Product.name)
+            .join(LessonEnrollment, LessonEnrollment.product_id == Product.id)
+            .filter(LessonEnrollment.id == row.enrollment_id)
+            .scalar()
+        )
+        lesson_items.append(
+            {
+                "id": row.id,
+                "student_id": row.student_id,
+                "student_name": student_name,
+                "enrollment_id": row.enrollment_id,
+                "billing_unit": row.billing_unit,
+                "product_name": product_name,
+                "total_sessions": row.total_sessions,
+                "completed_sessions": row.completed_sessions,
+                "final_amount": row.final_amount,
+                "trial_fee": row.trial_fee,
+                "refund_amount": row.refund_amount,
+                "payment_tag": row.payment_tag,
+                "memo": row.memo,
+            }
+        )
+
+    refund_rows = (
+        db.query(RefundRequest)
+        .filter(RefundRequest.billing_month == billing_month)
+        .order_by(RefundRequest.id.asc())
+        .all()
+    )
+    refund_items = [
+        {
+            "id": r.id,
+            "enrollment_id": r.enrollment_id,
+            "student_id": r.student_id,
+            "paid_amount": r.paid_amount,
+            "refund_amount": r.refund_amount,
+            "status": r.status,
+        }
+        for r in refund_rows
+    ]
+
+    return {
+        "teacher_id": teacher_id,
+        "teacher_name": teacher_name,
+        "billing_month": billing_month,
+        "settlement_summary": settlement_summary,
+        "lesson_records": lesson_items,
+        "refund_requests": refund_items,
+    }
+
+
+@app.get("/api/students")
+def list_students(month: Optional[str] = None, db: Session = Depends(get_db)):
+    """
+    학생 수납/관리용 학생 목록.
+    - 학생(이름/연락) + 연결된 구독(상품/결제수단/담당선생님) 요약을 제공합니다.
+    """
+    # 조회월 기준: 해당 월에 "수납(금액>0)"이 있는 학생만 리스트업
+    # month 미지정이면 기존처럼 전체 학생 반환(레거시)
+    return list_students_by_month(db, month=month)
+
+
+def _month_range(month: str) -> tuple[date, date]:
+    """'YYYY-MM' -> (월초, 월말)"""
+    year_s, month_s = str(month).split("-")
+    y, m = int(year_s), int(month_s)
+    start = date(y, m, 1)
+    if m == 12:
+        end = date(y + 1, 1, 1)
+    else:
+        end = date(y, m + 1, 1)
+    # end is exclusive
+    return start, date.fromordinal(end.toordinal() - 1)
+
+
+def _parse_date_only(value: Optional[str]) -> Optional[date]:
+    if not value:
+        return None
+    text = str(value).strip()[:10]
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _enrollment_valid_for_month(enrollment: LessonEnrollment, month: str) -> bool:
+    start_m, end_m = _month_range(month)
+
+    start = _parse_date_only(enrollment.start_date)
+    if not start:
+        return False
+
+    end = _parse_date_only(enrollment.end_date)
+    cancelled = _parse_date_only(enrollment.cancelled_at)
+
+    if cancelled and cancelled < start_m:
+        return False
+    if end and end < start_m:
+        return False
+    if start > end_m:
+        return False
+    return True
+
+
+def list_students_by_month(db: Session, month: Optional[str] = None) -> dict[str, Any]:
+    if not month:
+        # 레거시: 전체 학생
+        items = []
+        students = (
+            db.query(
+                StudentProfile.id,
+                StudentProfile.phone,
+                StudentProfile.grade_level,
+                StudentProfile.parent_name,
+                StudentProfile.parent_phone,
+                User.name,
+            )
+            .join(User, User.id == StudentProfile.user_id)
+            .order_by(User.name.asc())
+            .all()
+        )
+        for student_profile_id, phone, grade_level, parent_name, parent_phone, student_name in students:
+            items.append(
+                {
+                    "student_id": student_profile_id,
+                    "student_name": student_name,
+                    "phone": phone,
+                    "grade_level": grade_level,
+                    "parent_name": parent_name,
+                    "parent_phone": parent_phone,
+                }
+            )
+        return {"billing_month": None, "items": items}
+
+    # 학생별 월 수납 합계 + 해당 월 상품/선생님 요약
+    payment_rows = (
+        db.query(
+            StudentProfile.id.label("student_id"),
+            User.name.label("student_name"),
+            MonthlyPaymentRecord.enrollment_id.label("enrollment_id"),
+            MonthlyPaymentRecord.final_amount.label("final_amount"),
+            MonthlyPaymentRecord.billing_unit.label("billing_unit"),
+            LessonEnrollment.teacher_id.label("teacher_id"),
+            LessonEnrollment.payment_method.label("payment_method"),
+            Product.name.label("product_name"),
+        )
+        .join(User, User.id == StudentProfile.user_id)
+        .join(MonthlyPaymentRecord, MonthlyPaymentRecord.student_id == StudentProfile.id)
+        .outerjoin(LessonEnrollment, LessonEnrollment.id == MonthlyPaymentRecord.enrollment_id)
+        .outerjoin(Product, Product.id == LessonEnrollment.product_id)
+        .filter(MonthlyPaymentRecord.billing_month == month)
+        .filter(MonthlyPaymentRecord.final_amount > 0)
+        .order_by(User.name.asc(), MonthlyPaymentRecord.id.asc())
+        .all()
+    )
+
+    teacher_names_by_id = {
+        tid: name
+        for tid, name in (
+            db.query(TeacherProfile.id, User.name)
+            .join(User, User.id == TeacherProfile.user_id)
+            .all()
+        )
+        if tid and name
+    }
+
+    agg: dict[int, dict[str, Any]] = {}
+    for row in payment_rows:
+        sid = int(row.student_id)
+        entry = agg.get(sid)
+        if not entry:
+            entry = {
+                "student_id": sid,
+                "student_name": row.student_name,
+                "month_paid_amount": 0,
+                "products": [],
+                "teachers": [],
+                "billing_units": [],
+                "payment_methods": [],
+            }
+            agg[sid] = entry
+
+        entry["month_paid_amount"] += _safe_int(row.final_amount)
+
+        if row.product_name and row.product_name not in entry["products"]:
+            entry["products"].append(row.product_name)
+        tname = teacher_names_by_id.get(int(row.teacher_id)) if row.teacher_id is not None else None
+        if tname and tname not in entry["teachers"]:
+            entry["teachers"].append(tname)
+        if row.billing_unit and row.billing_unit not in entry["billing_units"]:
+            entry["billing_units"].append(row.billing_unit)
+        if row.payment_method and row.payment_method not in entry["payment_methods"]:
+            entry["payment_methods"].append(row.payment_method)
+
+    items = sorted(agg.values(), key=lambda x: (x.get("student_name") or ""))
+    return {"billing_month": month, "items": items}
+
+
+@app.get("/api/students/{student_id}")
+def student_detail(student_id: int, month: Optional[str] = None, db: Session = Depends(get_db)):
+    """
+    학생 상세: 수업(학생↔선생님) + 월별 수납 + 환불.
+    """
+    student_row = (
+        db.query(StudentProfile, User.name)
+        .join(User, User.id == StudentProfile.user_id)
+        .filter(StudentProfile.id == student_id)
         .first()
     )
-    if duplicate:
-        raise HTTPException(status_code=400, detail="이미 존재하는 학생 이름입니다.")
+    if not student_row:
+        return {"detail": "학생을 찾을 수 없습니다."}
+    student, student_name = student_row
 
-    student.student_name = name
-    student.parent_name = _clean_optional_text(payload.parent_name)
-    student.contact = _clean_optional_text(payload.contact)
-    student.status = _clean_optional_text(payload.status)
-    student.notes = _clean_optional_text(payload.notes)
-    student.updated_at = datetime.utcnow()
-    db.commit()
-    return {"id": student.id}
-
-
-@app.post("/api/students/{student_id}/events")
-def create_student_event(student_id: int, payload: StudentEventCreate, db: Session = Depends(get_db)):
-    student = db.get(StudentRecord, student_id)
-    if not student:
-        raise HTTPException(status_code=404, detail="학생 정보를 찾을 수 없습니다.")
-
-    now = datetime.utcnow()
-    event = StudentEvent(
-        student_id=student_id,
-        event_date=payload.event_date,
-        event_type=payload.event_type.strip(),
-        title=payload.title.strip(),
-        teacher_name=_clean_optional_text(payload.teacher_name),
-        payment_method=_clean_optional_text(payload.payment_method),
-        weekly_frequency=_clean_optional_text(payload.weekly_frequency),
-        weekdays=_clean_optional_text(payload.weekdays),
-        time_text=_clean_optional_text(payload.time_text),
-        product_name=_clean_optional_text(payload.product_name),
-        amount=payload.amount,
-        memo=_clean_optional_text(payload.memo),
-        created_at=now,
-        updated_at=now,
+    subs = (
+        db.query(LessonEnrollment, Product.name, User.name)
+        .outerjoin(Product, Product.id == LessonEnrollment.product_id)
+        .outerjoin(TeacherProfile, TeacherProfile.id == LessonEnrollment.teacher_id)
+        .outerjoin(User, User.id == TeacherProfile.user_id)
+        .filter(LessonEnrollment.student_id == student_id)
+        .order_by(LessonEnrollment.id.desc())
+        .all()
     )
-    db.add(event)
-    db.commit()
-    db.refresh(event)
-    return {"id": event.id}
+    enrollment_items = []
+    for sub, product_name, teacher_name in subs:
+        item = {
+            "enrollment_id": sub.id,
+            "teacher_id": sub.teacher_id,
+            "teacher_name": teacher_name or f"teacher#{sub.teacher_id}",
+            "product_id": sub.product_id,
+            "product_name": product_name,
+            "payment_method": sub.payment_method,
+            "commission_rate": sub.current_commission_rate,
+            "trial_date": sub.trial_date,
+            "trial_month": sub.trial_month,
+            "trial_fee": _safe_int(sub.trial_fee),
+            "start_date": sub.start_date,
+            "end_date": sub.end_date,
+            "next_billing": resolve_next_billing(sub) or sub.next_billing,
+            "first_month_sessions": sub.first_month_sessions,
+            "first_month_ratio": sub.first_month_ratio,
+            "first_month_amount": sub.first_month_amount,
+        }
+        if month:
+            item["is_valid_for_month"] = _enrollment_valid_for_month(sub, month)
+        enrollment_items.append(item)
 
+    payment_q = db.query(MonthlyPaymentRecord).filter(MonthlyPaymentRecord.student_id == student_id)
+    if month:
+        payment_q = payment_q.filter(MonthlyPaymentRecord.billing_month == month)
+    payment_rows = payment_q.order_by(MonthlyPaymentRecord.billing_month.desc(), MonthlyPaymentRecord.id.desc()).all()
 
-@app.put("/api/student-events/{event_id}")
-def update_student_event(event_id: int, payload: StudentEventUpdate, db: Session = Depends(get_db)):
-    event = db.get(StudentEvent, event_id)
-    if not event:
-        raise HTTPException(status_code=404, detail="학생 이벤트를 찾을 수 없습니다.")
-
-    event.event_date = payload.event_date
-    event.event_type = payload.event_type.strip()
-    event.title = payload.title.strip()
-    event.teacher_name = _clean_optional_text(payload.teacher_name)
-    event.payment_method = _clean_optional_text(payload.payment_method)
-    event.weekly_frequency = _clean_optional_text(payload.weekly_frequency)
-    event.weekdays = _clean_optional_text(payload.weekdays)
-    event.time_text = _clean_optional_text(payload.time_text)
-    event.product_name = _clean_optional_text(payload.product_name)
-    event.amount = payload.amount
-    event.memo = _clean_optional_text(payload.memo)
-    event.updated_at = datetime.utcnow()
-    db.commit()
-    return {"id": event.id}
-
-
-@app.delete("/api/student-events/{event_id}")
-def delete_student_event(event_id: int, db: Session = Depends(get_db)):
-    event = db.get(StudentEvent, event_id)
-    if not event:
-        raise HTTPException(status_code=404, detail="학생 이벤트를 찾을 수 없습니다.")
-
-    db.delete(event)
-    db.commit()
-    return {"deleted": True}
-
-
-@app.post("/api/import/workbook", response_model=ImportResponse)
-async def import_workbook(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    if not file.filename or not file.filename.lower().endswith((".xlsx", ".xlsm", ".xltx", ".xltm")):
-        raise HTTPException(status_code=400, detail="엑셀 워크북(.xlsx) 파일만 업로드할 수 있습니다.")
-
-    file_bytes = await file.read()
-    sync_workbook(db, workbook_bytes=file_bytes, source_name=file.filename)
-
-    app_data = _build_app_data(db)
-    imported_count = (
-        len(app_data["teacher_settlements"])
-        + len(app_data["monthly_settlements"])
-        + len(app_data["tuition_records"])
-        + len(app_data["session_settlements"])
-        + len(app_data["session_collections"])
-        + len(app_data["product_prices"])
-        + len(app_data["rate_table_rows"])
+    history_rows = (
+        db.query(MonthlyPaymentRecord)
+        .filter(MonthlyPaymentRecord.student_id == student_id)
+        .filter(MonthlyPaymentRecord.billing_month != month if month else True)
+        .order_by(MonthlyPaymentRecord.billing_month.desc(), MonthlyPaymentRecord.id.desc())
+        .all()
     )
-    return {
-        "imported_count": imported_count,
-        "source_name": file.filename,
-        "available_months": app_data["meta"]["available_months"],
+
+    enrollment_ids = {
+        row.enrollment_id for row in (*payment_rows, *history_rows) if row.enrollment_id
     }
+    payment_method_by_enrollment = (
+        {
+            eid: pm
+            for eid, pm in db.query(LessonEnrollment.id, LessonEnrollment.payment_method)
+            .filter(LessonEnrollment.id.in_(enrollment_ids))
+            .all()
+        }
+        if enrollment_ids
+        else {}
+    )
+
+    month_payment_items = [
+        {
+            "id": row.id,
+            "billing_month": row.billing_month,
+            "teacher_id": row.teacher_id,
+            "enrollment_id": row.enrollment_id,
+            "billing_unit": row.billing_unit,
+            "teacher_name": _teacher_name_by_profile_id(db, row.teacher_id),
+            "product_name": (
+                db.query(Product.name)
+                .join(LessonEnrollment, LessonEnrollment.product_id == Product.id)
+                .filter(LessonEnrollment.id == row.enrollment_id)
+                .scalar()
+            ),
+            "payment_method": payment_method_by_enrollment.get(row.enrollment_id),
+            "total_sessions": row.total_sessions,
+            "completed_sessions": row.completed_sessions,
+            "base_amount": row.base_amount,
+            "special_amount": row.special_amount,
+            "refund_amount": row.refund_amount,
+            "final_amount": row.final_amount,
+            "trial_fee": row.trial_fee,
+            "payment_tag": row.payment_tag,
+            "memo": row.memo,
+        }
+        for row in payment_rows
+    ]
+
+    history_items = [
+        {
+            "id": row.id,
+            "billing_month": row.billing_month,
+            "teacher_id": row.teacher_id,
+            "enrollment_id": row.enrollment_id,
+            "billing_unit": row.billing_unit,
+            "payment_method": payment_method_by_enrollment.get(row.enrollment_id),
+            "final_amount": row.final_amount,
+            "payment_tag": row.payment_tag,
+            "memo": row.memo,
+        }
+        for row in history_rows
+    ]
+
+    refund_rows = (
+        db.query(RefundRequest)
+        .filter(RefundRequest.student_id == student_id)
+        .order_by(RefundRequest.billing_month.desc(), RefundRequest.id.desc())
+        .all()
+    )
+    refund_items = [
+        {
+            "id": r.id,
+            "billing_month": r.billing_month,
+            "enrollment_id": r.enrollment_id,
+            "paid_amount": r.paid_amount,
+            "refund_amount": r.refund_amount,
+            "status": r.status,
+        }
+        for r in refund_rows
+    ]
+
+    return {
+        "student_id": student_id,
+        "student_name": student_name,
+        "billing_month": month,
+        "phone": student.phone,
+        "grade_level": student.grade_level,
+        "parent_name": student.parent_name,
+        "parent_phone": student.parent_phone,
+        "enrollments": [e for e in enrollment_items if (not month or e.get("is_valid_for_month"))],
+        "month_payments": month_payment_items,
+        "payment_history": history_items,
+        "refund_requests": refund_items,
+    }
+
+
+@app.get("/api/register/options")
+def register_options(db: Session = Depends(get_db)):
+    """데이터 등록 화면용 선택 목록."""
+    return list_register_options(db)
+
+
+@app.post("/api/register/user")
+def register_user_endpoint(payload: RegisterUserPayload, db: Session = Depends(get_db)):
+    """
+    사용자 + 역할별 프로필(학생/선생님) 한 번에 생성.
+    """
+    try:
+        result = register_user(db, payload.model_dump())
+        db.commit()
+        return {"ok": True, **result}
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/register/enrollment")
+@app.post("/api/register/subscription")
+def register_enrollment_endpoint(payload: RegisterEnrollmentPayload, db: Session = Depends(get_db)):
+    """
+    수업(학생↔선생님) 생성. 시범일 입력 시 trial_fee는 10,000원으로 자동 설정.
+    """
+    try:
+        result = register_enrollment(db, payload.model_dump())
+        db.commit()
+        return {"ok": True, "trial_fee_amount": TRIAL_FEE_AMOUNT, **result}
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/admin/schemas")
+def admin_list_schemas():
+    return {"tables": get_all_schemas()}
+
+
+@app.get("/api/admin/overview")
+def admin_tables_overview(max_rows: int = 2000, db: Session = Depends(get_db)):
+    max_rows = min(max(max_rows, 1), 5000)
+    return build_tables_overview(db, max_rows_per_table=max_rows)
+
+
+@app.get("/api/admin/tables/{table_name}/rows")
+def admin_list_table_rows(
+    table_name: str,
+    offset: int = 0,
+    limit: int = 50,
+    q: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    if table_name not in list_table_names():
+        raise HTTPException(status_code=404, detail="알 수 없는 테이블입니다.")
+    limit = min(max(limit, 1), 200)
+    offset = max(offset, 0)
+    try:
+        return list_rows(db, table_name, offset=offset, limit=limit, query=q)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="알 수 없는 테이블입니다.") from None
+
+
+@app.get("/api/admin/tables/{table_name}/rows/{row_id}")
+def admin_get_table_row(table_name: str, row_id: int, db: Session = Depends(get_db)):
+    if table_name not in list_table_names():
+        raise HTTPException(status_code=404, detail="알 수 없는 테이블입니다.")
+    try:
+        return get_row(db, table_name, row_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/admin/tables/{table_name}/rows")
+def admin_create_table_row(table_name: str, payload: AdminRowPayload, db: Session = Depends(get_db)):
+    if table_name not in list_table_names():
+        raise HTTPException(status_code=404, detail="알 수 없는 테이블입니다.")
+    try:
+        return create_row(db, table_name, payload.values)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put("/api/admin/tables/{table_name}/rows/{row_id}")
+def admin_update_table_row(
+    table_name: str,
+    row_id: int,
+    payload: AdminRowPayload,
+    db: Session = Depends(get_db),
+):
+    if table_name not in list_table_names():
+        raise HTTPException(status_code=404, detail="알 수 없는 테이블입니다.")
+    try:
+        return update_row(db, table_name, row_id, payload.values)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/admin/tables/{table_name}/rows/{row_id}")
+def admin_delete_table_row(table_name: str, row_id: int, db: Session = Depends(get_db)):
+    if table_name not in list_table_names():
+        raise HTTPException(status_code=404, detail="알 수 없는 테이블입니다.")
+    try:
+        return delete_row(db, table_name, row_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
