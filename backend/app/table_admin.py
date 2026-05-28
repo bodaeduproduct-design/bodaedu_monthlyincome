@@ -98,6 +98,22 @@ def _apply_search_filter(
             .distinct()
         )
 
+    if canonical == "student_profiles":
+        linked_user = aliased(User)
+        return (
+            q.join(linked_user, linked_user.id == StudentProfile.user_id)
+            .filter(or_(*field_filters, linked_user.name.ilike(term)))
+            .distinct()
+        )
+
+    if canonical == "teacher_profiles":
+        linked_user = aliased(User)
+        return (
+            q.join(linked_user, linked_user.id == TeacherProfile.user_id)
+            .filter(or_(*field_filters, linked_user.name.ilike(term)))
+            .distinct()
+        )
+
     if not field_filters:
         return q
     return q.filter(or_(*field_filters))

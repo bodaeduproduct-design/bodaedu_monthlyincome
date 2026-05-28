@@ -46,9 +46,12 @@ def list_register_options(db: Session) -> dict[str, Any]:
             "id": tp.id,
             "name": name,
             "user_id": tp.user_id,
+            "email": email,
+            "status": tp.status or "active",
+            "status_changed_at": tp.status_changed_at,
         }
-        for tp, name in (
-            db.query(TeacherProfile, User.name)
+        for tp, name, email in (
+            db.query(TeacherProfile, User.name, User.email)
             .join(User, User.id == TeacherProfile.user_id)
             .order_by(User.name.asc())
             .all()

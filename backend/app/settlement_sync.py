@@ -11,7 +11,10 @@ from sqlalchemy.orm import Session
 from .models import MonthlyPaymentRecord, Settlement
 
 
+# 정규·시범 지급: 선생님 몫(세전) × SETTLEMENT_FEE_MULTIPLIER (= 1 - 3.3% 정산 수수료)
 DEFAULT_WITHHOLDING_RATE = 3.3
+SETTLEMENT_FEE_RATE = DEFAULT_WITHHOLDING_RATE
+SETTLEMENT_FEE_MULTIPLIER = round(1.0 - SETTLEMENT_FEE_RATE / 100.0, 4)  # 0.967
 
 
 @dataclass(frozen=True)
@@ -130,6 +133,11 @@ def sync_settlements_from_payments(
             changed += 1
 
     db.flush()
+    changed += prune_settlements_without_payments(
+        db,
+        billing_months=[billing_month] if billing_month else None,
+        teacher_ids=[teacher_id] if teacher_id else None,
+    )
     return changed
 
 

@@ -9,7 +9,22 @@
   z-index: 20;
   background: rgba(255, 255, 255, 0.96);
   backdrop-filter: blur(10px);
-  border-bottom: 1px solid #e9eef5;
+  border-bottom: none;
+}
+
+/* remove bottom strokes globally (requested) */
+.app-header,
+.page-panel__header,
+.section-card__header,
+.dash-chart-panel header,
+.sidebar__brand,
+.topbar,
+.settlement-modal__header,
+.register-section__header,
+.data-overview__section-head,
+.data-admin__table thead tr,
+.db-schema-table-head {
+  border-bottom: none !important;
 }
 
 .app-header__inner {
@@ -38,6 +53,28 @@
   color: #ffffff;
   font-size: 15px;
   font-weight: 800;
+}
+
+.brand-logo {
+  display: block;
+  width: 22px;
+  height: 22px;
+}
+
+.brand-mark--logo-only {
+  width: 135px;
+  height: 30px;
+  border-radius: 0;
+  background: transparent !important;
+  box-shadow: none !important;
+  border: none !important;
+  padding: 0 !important;
+}
+
+.brand-logo--full {
+  width: 135px;
+  height: 30px;
+  object-fit: contain;
 }
 
 .brand-text {
@@ -144,7 +181,7 @@
 }
 
 .page-shell {
-  padding-top: 22px;
+  padding-top: 18px;
 }
 
 .page-panel {
@@ -161,23 +198,148 @@
 .page-panel__header {
   display: flex;
   justify-content: space-between;
-  gap: 24px;
+  gap: 12px;
   align-items: flex-start;
-  padding: 26px 28px 22px;
-  border-bottom: 1px solid #eef2f7;
+  padding: 14px 20px 12px;
+  border-bottom: none;
 }
 
 .page-panel__body {
   display: flex;
   flex-direction: column;
-  gap: 20px;
-  padding: 24px 28px 28px;
+  gap: 0;
+  padding: 0;
+}
+
+.month-scroll-nav {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 4px 2px 2px;
+  margin-top: -4px;
+}
+
+.month-pill {
+  border: none;
+  border-radius: 12px;
+  background: #eef2f7;
+  color: #475569;
+  padding: 8px 12px;
+  min-width: 74px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  cursor: pointer;
+  font: inherit;
+  white-space: nowrap;
+}
+
+.month-pill span {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.month-pill small {
+  font-size: 10px;
+  color: #94a3b8;
+}
+
+.month-pill.active {
+  background: #2563eb;
+  color: #fff;
+}
+
+.month-pill.active small {
+  color: rgba(255, 255, 255, 0.78);
+}
+
+/* global select spacing: right icon area */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  padding-right: 44px !important;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 20px center;
+  background-size: 14px 14px;
+}
+
+.toolbar-field select,
+.editor-form select,
+.db-schema-tables-toolbar select {
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  -moz-appearance: none !important;
+  background-repeat: no-repeat !important;
+  background-position: right 20px center !important;
+  background-size: 14px 14px !important;
+}
+
+/* unified typography and layout hierarchy */
+.topbar__title {
+  font-size: clamp(20px, 2.2vw, 26px) !important;
+  margin: 0 !important;
+  line-height: 1.2;
+}
+
+.section-card__header h3 {
+  font-size: 18px !important;
+  font-weight: 700 !important;
+}
+
+.dash-chart-panel h4,
+.teacher-detail-block__header h4,
+.student-detail-block__header h4 {
+  font-size: 16px !important;
+  font-weight: 700;
+}
+
+.kpi-card__label {
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  line-height: 1.35;
+}
+
+.kpi-card__value {
+  font-size: 28px !important;
+}
+
+.kpi-card--compact .kpi-card__value {
+  font-size: 24px !important;
+}
+
+.settlement-overview-table thead th {
+  font-size: 12px !important;
+}
+
+.settlement-overview-table tbody td {
+  font-size: 13px !important;
+}
+
+.teacher-settlement-summary {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+@media (max-width: 1200px) {
+  .teacher-settlement-summary {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 900px) {
+  .teacher-settlement-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .page-heading {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 2px;
 }
 
 .page-heading .eyebrow {
@@ -189,10 +351,10 @@
 }
 
 .page-heading__desc {
-  margin: 2px 0 0;
-  font-size: 13px;
+  margin: 0;
+  font-size: 12px;
   color: #64748b;
-  line-height: 1.5;
+  line-height: 1.35;
 }
 
 .page-heading__meta {
@@ -200,66 +362,250 @@
   color: #94a3b8;
 }
 
+.teacher-report-layout {
+  display: grid;
+  gap: 16px;
+}
+
+.teacher-report-kpis {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.settlement-metric {
+  border: none;
+  border-radius: 14px;
+  background: #f3f7ff;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settlement-metric span {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.settlement-metric strong {
+  font-size: 17px;
+  color: #0f172a;
+}
+
+.settlement-metric small {
+  font-size: 11px;
+  color: #64748b;
+}
+
+.teacher-report-chart {
+  border: none;
+  border-radius: 16px;
+  background: #f8fbff;
+  padding: 14px 16px 10px;
+}
+
+.teacher-report-chart header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.teacher-report-chart h4 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.teacher-report-chart header span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.stacked-chart__legend {
+  display: flex;
+  gap: 12px;
+  font-size: 12px;
+  color: #475569;
+  margin-bottom: 8px;
+}
+
+.stacked-chart__legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.stacked-chart__legend i {
+  width: 10px;
+  height: 10px;
+  border-radius: 99px;
+  display: inline-block;
+}
+
+.stacked-chart__svg {
+  width: 100%;
+  height: auto;
+}
+
+.stacked-chart__label {
+  fill: #334155;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.stacked-chart__value {
+  fill: #64748b;
+  font-size: 11px;
+}
+
+.teacher-payout-cards {
+  display: grid;
+  gap: 10px;
+}
+
+.teacher-payout-card {
+  border: none;
+  border-radius: 16px;
+  background: #f8fafc;
+  padding: 14px 16px;
+  display: grid;
+  gap: 10px;
+}
+
+.teacher-payout-card__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.teacher-payout-card__head h4 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.teacher-payout-card__head small {
+  display: block;
+  margin-top: 4px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.teacher-payout-card__total {
+  text-align: right;
+}
+
+.teacher-payout-card__total span {
+  display: block;
+  font-size: 11px;
+  color: #64748b;
+}
+
+.teacher-payout-card__total strong {
+  font-size: 24px;
+  color: #0f172a;
+}
+
+.teacher-payout-card__breakdown {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.teacher-payout-card__breakdown span {
+  background: #eef2f7;
+  border-radius: 999px;
+  padding: 5px 10px;
+}
+
+.teacher-payout-card__actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+@media (max-width: 1400px) {
+  .teacher-report-kpis {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 900px) {
+  .teacher-report-kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .student-collection-kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 .page-content {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 0;
 }
 
 /* DB 그룹 하위 탭 */
 .db-subnav {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
-  padding: 4px;
-  border-radius: 12px;
-  background: #f1f5f9;
-  border: 1px solid #e2e8f0;
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid #111827;
+  overflow-x: auto;
 }
 
 .db-subnav__item {
-  display: flex;
+  display: inline-flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 4px;
-  padding: 12px 14px;
-  border: 1px solid transparent;
-  border-radius: 10px;
+  justify-content: center;
+  gap: 2px;
+  padding: 14px 22px 12px;
+  border: none;
+  border-bottom: 3px solid transparent;
   background: transparent;
-  text-align: left;
+  text-align: center;
   cursor: pointer;
   font: inherit;
-  transition:
-    background 0.15s ease,
-    border-color 0.15s ease,
-    box-shadow 0.15s ease;
+  white-space: nowrap;
+  flex: 0 0 auto;
+  transition: color 0.15s ease, border-color 0.15s ease;
 }
 
 .db-subnav__item:hover {
-  background: rgba(255, 255, 255, 0.72);
-  border-color: #e2e8f0;
+  background: transparent;
+  border-bottom-color: #111827;
 }
 
 .db-subnav__item.active {
-  background: #ffffff;
-  border-color: #bfdbfe;
-  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.1);
+  background: transparent;
+  border-bottom-color: #111827;
+  box-shadow: none;
 }
 
 .db-subnav__label {
-  font-size: 14px;
+  font-size: 18px;
   font-weight: 700;
-  color: #0f172a;
+  color: #9ca3af;
 }
 
 .db-subnav__item.active .db-subnav__label {
-  color: #1d4ed8;
+  color: #111827;
 }
 
 .db-subnav__desc {
+  display: block;
   font-size: 11px;
-  line-height: 1.35;
-  color: #64748b;
+  color: #9ca3af;
+  line-height: 1.2;
 }
 
 .db-workspace {
@@ -280,31 +626,34 @@
 .layout-shell {
   display: grid;
   grid-template-columns: 200px minmax(0, 1fr);
-  gap: 48px;
+  gap: 20px;
   align-items: start;
 }
 
 .sidebar {
   position: sticky;
   top: 24px;
-  padding: 8px 0 0;
+  padding: 12px;
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 14px;
+  border-radius: 16px;
+  background: #ffffff;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
 }
 
 .sidebar__brand {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding-bottom: 14px;
-  border-bottom: 1px solid #f1f5f9;
+  gap: 4px;
+  padding: 4px 2px 12px;
+  border-bottom: 1px solid #edf2f7;
 }
 
 .sidebar__brand h1 {
   margin: 0;
-  font-size: 26px;
-  font-weight: 700;
+  font-size: 18px;
+  font-weight: 800;
 }
 
 .sidebar__brand p:last-child,
@@ -333,12 +682,13 @@
 
 .nav-item {
   border: none;
-  border-radius: 10px;
-  padding: 9px 10px;
+  border-radius: 12px;
+  padding: 12px 12px;
   background: transparent;
-  color: #64748b;
+  color: #475569;
   font: inherit;
-  font-weight: 600;
+  font-size: 14px;
+  font-weight: 700;
   text-align: left;
   cursor: pointer;
   transition: 0.18s ease;
@@ -350,8 +700,8 @@
 }
 
 .nav-item.active {
-  background: #f8fafc;
-  color: #0f172a;
+  background: #2563eb;
+  color: #ffffff;
 }
 
 .sidebar__sync {
@@ -378,8 +728,8 @@
 }
 
 .topbar__title {
-  margin: 4px 0 10px;
-  font-size: clamp(24px, 3vw, 32px);
+  margin: 0;
+  font-size: clamp(20px, 2.2vw, 26px);
   letter-spacing: -0.02em;
 }
 
@@ -450,6 +800,28 @@
   background: #ffffff;
 }
 
+.teacher-search-field {
+  min-width: 220px;
+}
+
+.teacher-settlement-actions {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.icon-only-button {
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  line-height: 1;
+}
+
 .toolbar-field select:focus,
 .toolbar-field input:focus {
   outline: none;
@@ -497,6 +869,51 @@
   background: #fef2f2;
   border: 1px solid #fca5a5;
   color: #991b1b;
+}
+
+.rate-adjust-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: #f8fafc;
+  border: none;
+  color: #0f172a;
+  margin-bottom: 20px;
+}
+
+.rate-adjust-banner__message {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rate-adjust-banner__icon {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: #fee2e2;
+  color: #dc2626;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.rate-adjust-banner__action {
+  border: none;
+  background: transparent;
+  color: #475569;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 0;
+}
+
+.kpi-card--clickable {
+  cursor: pointer;
 }
 
 .stats-grid {
@@ -813,8 +1230,29 @@
 .table-wrap {
   overflow-x: auto;
   border: 1px solid #f1f5f9;
-  border-radius: 14px;
+  border-radius: 0;
   background: #ffffff;
+}
+
+/* 공통 테이블 레이아웃: 한 화면 가독성 우선 */
+.table-wrap table {
+  width: 100%;
+  table-layout: fixed;
+  border-radius: 0;
+}
+
+.table-wrap thead th,
+.table-wrap tbody td,
+.table-wrap tfoot td {
+  text-align: center;
+  vertical-align: middle;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.table-wrap .link-button {
+  white-space: nowrap;
 }
 
 .students-layout {
@@ -1050,7 +1488,9 @@ tbody tr:hover td {
 }
 
 .settlement-overview-table {
-  min-width: 1100px;
+  min-width: 0;
+  width: 100%;
+  table-layout: fixed;
   font-size: 13px;
 }
 
@@ -1062,18 +1502,41 @@ tbody tr:hover td {
 
 .settlement-overview-table tbody td,
 .settlement-overview-table tfoot td {
-  text-align: right;
+  text-align: center;
   white-space: nowrap;
 }
 
-.settlement-overview-table tbody td:first-child,
-.settlement-overview-table tfoot td:first-child {
-  text-align: left;
+.teacher-report-layout .settlement-overview-table thead th,
+.teacher-report-layout .settlement-overview-table tbody td {
+  padding-top: 10px;
+  padding-bottom: 10px;
 }
 
 .settlement-overview-table tfoot td {
   font-weight: 700;
   background: #f1f5f9;
+}
+
+/* 상세 버튼 열이 잘리지 않도록 고정 폭 보장 */
+.settlement-overview-table th:last-child,
+.settlement-overview-table td:last-child {
+  width: 92px;
+}
+
+/* 선생님별 정산 표 컬럼 폭 보정 */
+.teacher-report-layout .settlement-overview-table th:nth-child(1),
+.teacher-report-layout .settlement-overview-table td:nth-child(1) {
+  width: 130px;
+}
+
+.teacher-report-layout .settlement-overview-table th:nth-child(2),
+.teacher-report-layout .settlement-overview-table td:nth-child(2) {
+  width: 90px;
+}
+
+.teacher-report-layout .settlement-overview-table th:nth-child(6),
+.teacher-report-layout .settlement-overview-table td:nth-child(6) {
+  width: 200px;
 }
 
 .modal-backdrop {
@@ -1096,7 +1559,7 @@ tbody tr:hover td {
 }
 
 .settlement-modal {
-  padding: 20px 22px 24px;
+  padding: 20px 33px 36px;
 }
 
 .settlement-modal__header {
@@ -1105,6 +1568,12 @@ tbody tr:hover td {
   gap: 16px;
   align-items: flex-start;
   margin-bottom: 20px;
+}
+
+.settlement-modal__header-actions {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
 }
 
 .settlement-modal__meta {
@@ -1249,6 +1718,356 @@ tbody tr:hover td {
   white-space: normal;
   word-break: keep-all;
   overflow-wrap: anywhere;
+}
+
+.settlement-modal__body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.teacher-detail-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.teacher-detail-kpis {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.teacher-detail-kpi {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #f8fafc;
+  padding: 12px 14px;
+}
+
+.teacher-detail-kpi span {
+  display: block;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.teacher-detail-kpi strong {
+  display: block;
+  margin-top: 5px;
+  font-size: 18px;
+  color: #0f172a;
+}
+
+.teacher-detail-kpi small {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.teacher-detail-block {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #ffffff;
+  padding: 12px;
+}
+
+.teacher-detail-block__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.teacher-detail-block__header h4 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.teacher-detail-block__header span {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.teacher-detail-modal .table-wrap {
+  overflow-x: hidden;
+}
+
+.teacher-detail-modal .settlement-overview-table {
+  min-width: 0;
+  width: 100%;
+  table-layout: auto;
+}
+
+.teacher-detail-modal .settlement-overview-table thead th,
+.teacher-detail-modal .settlement-overview-table tbody td {
+  white-space: normal;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+
+.teacher-payout-total {
+  border: 1px solid #bfdbfe;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #eff6ff 0%, #ffffff 100%);
+  padding: 16px 18px;
+}
+
+.teacher-payout-total__main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 14px;
+}
+
+.teacher-payout-total__main span {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.teacher-payout-total__main strong {
+  font-size: 28px;
+  color: #1d4ed8;
+}
+
+.teacher-payout-total__steps {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr auto 1fr;
+  gap: 8px;
+  align-items: center;
+}
+
+.teacher-payout-total__steps > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.teacher-payout-total__steps span {
+  font-size: 11px;
+  color: #64748b;
+}
+
+.teacher-payout-total__steps strong {
+  font-size: 15px;
+}
+
+.teacher-payout-total__arrow {
+  color: #94a3b8;
+  font-weight: 700;
+  text-align: center;
+}
+
+.teacher-payout-total__deduct {
+  color: #b45309;
+}
+
+.teacher-payout-total--plain {
+  border: none;
+  background: #ffffff;
+  padding: 6px 0 10px;
+}
+
+.teacher-payout-total--plain .teacher-payout-total__main {
+  margin: 0;
+}
+
+.teacher-payout-total--plain .teacher-payout-total__main strong {
+  color: #0b1220;
+  font-size: 22px;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.teacher-payout-total--plain .teacher-payout-total__main span {
+  font-size: 13px;
+  color: #64748b;
+  font-weight: 600;
+}
+
+.teacher-payout-summary-card {
+  border: none;
+  background: #f8fafc;
+  padding: 12px 14px;
+  border-radius: 10px;
+}
+
+.teacher-payout-summary-card span {
+  display: block;
+  font-size: 12px;
+  color: #64748b;
+  font-weight: 600;
+}
+
+.teacher-payout-summary-card strong {
+  display: block;
+  margin-top: 3px;
+  font-size: 16px;
+  line-height: 1.1;
+  color: #111827;
+  letter-spacing: -0.02em;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.teacher-payout-summary-card p {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #94a3b8;
+  line-height: 1.35;
+}
+
+.teacher-payout-summary-row {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+}
+
+.teacher-payout-summary-row .teacher-payout-summary-card {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.teacher-detail-modal {
+  gap: 10px;
+}
+
+.teacher-detail-block {
+  padding: 10px;
+}
+
+.teacher-detail-block__header {
+  margin-bottom: 8px;
+  justify-content: flex-start;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.teacher-detail-block__header--trial {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: baseline !important;
+  justify-content: flex-start !important;
+  width: 100%;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.teacher-detail-block__header--trial h4 {
+  margin: 0;
+}
+
+.teacher-detail-block__header--trial span {
+  margin-left: 0;
+  white-space: nowrap;
+}
+
+
+.teacher-detail-block__header h4 {
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.teacher-detail-hint {
+  margin: 0 0 8px;
+  line-height: 1.35;
+}
+
+.teacher-detail-modal .table-wrap {
+  margin-top: 0;
+}
+
+.teacher-detail-modal .settlement-overview-table thead th,
+.teacher-detail-modal .settlement-overview-table tbody td {
+  text-align: center;
+  vertical-align: middle;
+  white-space: nowrap;
+  line-height: 1.25;
+  padding-top: 10px;
+  padding-bottom: 10px;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.teacher-detail-modal .settlement-overview-table tbody td strong {
+  font-weight: 500;
+}
+
+.teacher-detail-block--flat {
+  border: none;
+  padding: 0;
+  margin: 0;
+}
+
+.teacher-detail-block--flat > div {
+  display: block;
+}
+
+.teacher-detail-block--flat > div > * + * {
+  margin-top: 20px;
+}
+
+.teacher-detail-block--flat > div > .teacher-detail-block__header + .empty-state.compact {
+  margin-top: 8px;
+}
+
+.teacher-detail-block--flat > div > .empty-state.compact + .teacher-detail-block__header {
+  margin-top: 0;
+}
+
+.teacher-detail-block--flat > div > .teacher-detail-block__header:first-child {
+  margin-top: 30px;
+}
+
+.teacher-detail-subsection--per-session {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.teacher-detail-subsection--per-session > .teacher-detail-block__header {
+  margin-top: 16px;
+}
+
+.teacher-detail-modal .empty-state.compact {
+  min-height: 40px;
+  border-radius: 8px;
+  padding: 10px 12px;
+  border: none;
+}
+
+.teacher-detail-hint {
+  margin: 0 0 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #64748b;
+}
+
+.teacher-payout-flow-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.teacher-payout-flow-grid > div {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+}
+
+.teacher-payout-flow-grid span {
+  display: block;
+  font-size: 11px;
+  color: #64748b;
+}
+
+.teacher-payout-flow-grid strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 15px;
 }
 
 .enrollment-grid {
@@ -1553,8 +2372,24 @@ tbody tr:hover td {
 }
 
 @media (max-width: 1100px) {
+  .layout-shell {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .sidebar {
+    position: static;
+    top: auto;
+  }
+
+  .sidebar__nav {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+
   .db-subnav {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    overflow-x: auto;
   }
 
   .data-admin {
@@ -1588,16 +2423,19 @@ tbody tr:hover td {
 }
 
 @media (max-width: 720px) {
+  .sidebar__nav {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .db-subnav {
-    grid-template-columns: 1fr;
+    overflow-x: auto;
   }
 
   .db-subnav__desc {
     display: none;
   }
 
-  .page-panel__header,
-  .page-panel__body {
+  .page-panel__header {
     padding-left: 16px;
     padding-right: 16px;
   }
@@ -1608,6 +2446,9 @@ tbody tr:hover td {
   .student-summary-grid,
   .editor-grid,
   .student-detail-kpis,
+  .teacher-detail-kpis,
+  .teacher-payout-flow-grid,
+  .teacher-payout-total__steps,
   .settlement-modal__summary,
   .enrollment-card dl {
     grid-template-columns: 1fr;
@@ -2326,25 +3167,26 @@ tbody tr:hover td {
 
 .data-admin {
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr);
-  gap: 20px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
   min-height: 560px;
 }
 
 .data-admin__sidebar {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
-  max-height: 75vh;
-  overflow: auto;
-  padding: 12px;
-  border: 1px solid #e2e8f0;
-  border-radius: 12px;
-  background: #f8fafc;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: none;
+  overflow: visible;
+  padding: 20px 0 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
 }
 
 .data-admin__sidebar-title {
-  margin: 0 0 8px;
+  width: 100%;
+  margin: 0 0 4px;
   font-size: 12px;
   font-weight: 700;
   color: #94a3b8;
@@ -2355,7 +3197,8 @@ tbody tr:hover td {
   flex-direction: column;
   align-items: flex-start;
   gap: 2px;
-  width: 100%;
+  width: auto;
+  min-width: 140px;
   padding: 8px 10px;
   border: 1px solid transparent;
   border-radius: 8px;
@@ -2450,7 +3293,7 @@ tbody tr:hover td {
 
 .data-admin__body {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 320px;
+  grid-template-columns: minmax(0, 1fr) 360px;
   gap: 16px;
   align-items: start;
 }
@@ -2470,14 +3313,16 @@ tbody tr:hover td {
 .data-admin__table {
   min-width: max-content;
   width: max-content;
+  table-layout: auto !important;
 }
 
 .data-admin__table th,
 .data-admin__table td {
-  white-space: nowrap;
-  max-width: 280px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal !important;
+  max-width: none !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+  word-break: break-word;
   vertical-align: top;
   padding: 10px 12px;
 }
@@ -2827,6 +3672,7 @@ tbody tr:hover td {
   min-width: 100%;
   border-collapse: collapse;
   font-size: 12px;
+  table-layout: auto !important;
 }
 
 .data-overview__table th,
@@ -2835,8 +3681,11 @@ tbody tr:hover td {
   border-bottom: 1px solid #f1f5f9;
   border-right: 1px solid #f1f5f9;
   vertical-align: top;
-  max-width: 200px;
+  max-width: none !important;
   word-break: break-word;
+  white-space: normal !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
 }
 
 .data-overview__table th {
@@ -2929,28 +3778,47 @@ tbody tr:hover td {
   gap: 16px;
 }
 
-.dash-board__title {
-  margin: 0;
-  font-size: 18px;
-  font-weight: 700;
-  color: #0f172a;
+.dash-board__head-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
-.dash-board__desc {
-  margin: 4px 0 0;
-  font-size: 13px;
-  color: #64748b;
+.dash-board__title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 700;
+  color: #0f172a;
+  letter-spacing: -0.02em;
 }
 
 .dash-kpi {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
+}
+
+.dash-kpi--overview {
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.dash-kpi--overview-top {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.dash-kpi--overview-bottom {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 @media (max-width: 960px) {
   .dash-kpi {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .dash-kpi--overview-top,
+  .dash-kpi--overview-bottom,
+  .dash-kpi--overview {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -2963,11 +3831,11 @@ tbody tr:hover td {
 .kpi-card {
   background: #fff;
   border: 1px solid #e2e8f0;
-  border-radius: 10px;
-  padding: 16px 18px;
+  border-radius: 14px;
+  padding: 18px 18px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 
 .kpi-card__label {
@@ -2978,15 +3846,24 @@ tbody tr:hover td {
 
 .kpi-card__value {
   margin: 0;
-  font-size: 24px;
+  font-size: 28px;
   font-weight: 700;
   color: #0f172a;
-  line-height: 1.2;
+  line-height: 1.15;
   letter-spacing: -0.02em;
 }
 
 .kpi-card--compact .kpi-card__value {
-  font-size: 28px;
+  font-size: 30px;
+}
+
+.kpi-card--hero .kpi-card__value {
+  font-size: 44px;
+  line-height: 1.08;
+}
+
+.kpi-card__value--primary {
+  color: #2563eb;
 }
 
 .kpi-card__unit {
@@ -3009,17 +3886,50 @@ tbody tr:hover td {
 }
 
 .dash-sub {
-  margin: 2px 0 0;
+  margin: 0;
+  font-size: 12px;
+  color: #64748b;
+  font-weight: 600;
+}
+
+.kpi-card--revenue {
+  border-color: #dbeafe;
+}
+
+.kpi-card--net {
+  border-color: #e2e8f0;
+}
+
+.kpi-card--student {
+  border-color: #e5e7eb;
+}
+
+.kpi-card--teacher {
+  border-color: #e5e7eb;
+}
+
+.kpi-card--inquiry,
+.kpi-card--collection {
+  border-color: #e5e7eb;
+}
+
+.kpi-card__sub {
+  margin: 0;
   font-size: 12px;
   color: #64748b;
 }
 
+.kpi-sub-danger {
+  color: #dc2626;
+  font-weight: 700;
+}
+
 .dash-sub.muted-up {
-  color: #2563eb;
+  color: #dc2626;
 }
 
 .dash-sub.muted-down {
-  color: #64748b;
+  color: #2563eb;
 }
 
 .dash-charts {
@@ -3028,37 +3938,57 @@ tbody tr:hover td {
   gap: 12px;
 }
 
+.dash-charts--bottom {
+  grid-template-columns: 1fr 1fr;
+}
+
+.dash-charts--bottom .dash-chart-panel {
+  grid-column: 1 / 2;
+}
+
 @media (max-width: 900px) {
   .dash-charts {
     grid-template-columns: 1fr;
+  }
+
+  .dash-charts--bottom .dash-chart-panel {
+    grid-column: auto;
   }
 }
 
 .dash-chart-panel {
   background: #fff;
   border: 1px solid #e2e8f0;
-  border-radius: 10px;
-  padding: 16px 18px 8px;
+  border-radius: 14px;
+  padding: 16px 18px 10px;
 }
 
 .dash-chart-panel header {
-  margin-bottom: 8px;
-  padding-bottom: 10px;
-  border-bottom: 1px solid #f1f5f9;
+  margin-bottom: 10px;
+  padding-bottom: 0;
+  border-bottom: none;
 }
 
 .dash-chart-panel h4 {
   margin: 0;
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 700;
   color: #0f172a;
 }
 
 .dash-chart-panel header span {
   display: block;
-  margin-top: 2px;
+  margin-top: 4px;
   font-size: 12px;
-  color: #94a3b8;
+  color: #64748b;
+}
+
+.dash-chart-panel--revenue {
+  border-color: #dbeafe;
+}
+
+.dash-chart-panel--student {
+  border-color: #e2e8f0;
 }
 
 .chart-empty {
@@ -3174,8 +4104,213 @@ tbody tr:hover td {
   font-weight: 600;
 }
 
+/* ===== Visual refresh overrides (global) ===== */
+.app-shell {
+  background: #ffffff;
+}
+
+.page-panel {
+  border: none;
+  border-radius: 18px;
+  box-shadow: none;
+  background: #ffffff;
+}
+
+.section-card {
+  border: none;
+  border-radius: 16px;
+  background: #ffffff;
+  box-shadow: none;
+}
+
+.section-card__header {
+  border-bottom: none;
+  padding-bottom: 10px;
+}
+
+.section-card__header h3 {
+  font-size: 20px;
+  line-height: 1.2;
+}
+
+.section-card__header p {
+  margin-top: 6px;
+  font-size: 13px;
+}
+
+.summary-chip,
+.chip {
+  border: none !important;
+  border-radius: 999px;
+  background: #eef4ff;
+  color: #1e3a8a;
+  font-weight: 700;
+}
+
+.chip.active {
+  background: #2563eb;
+  color: #fff;
+}
+
+.table-wrap {
+  border: none;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.2);
+}
+
+.settlement-overview-table thead th {
+  background: #f5f8fc;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.settlement-overview-table tbody td {
+  border-bottom-color: #edf2f7;
+  font-size: 13px;
+}
+
+.settlement-overview-table tbody tr:hover {
+  background: #f9fbff;
+}
+
+.link-button {
+  border: none;
+  border-radius: 999px;
+  background: #e8f0ff;
+  color: #1d4ed8;
+  font-weight: 700;
+  padding: 8px 12px;
+}
+
+.link-button:hover {
+  background: #dbeafe;
+}
+
+.kpi-card,
+.student-detail-kpi,
+.teacher-detail-kpi {
+  border: none;
+  border-radius: 14px;
+  background: #f5f6f8;
+}
+
+.kpi-card__value,
+.teacher-payout-card__total strong,
+.student-detail-kpi strong {
+  letter-spacing: -0.02em;
+}
+
+.dash-chart-panel {
+  border: none;
+  border-radius: 16px;
+  box-shadow: none;
+  background: #f5f6f8;
+}
+
+.bar-chart--area .bar-chart__value {
+  fill: #334155;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.bar-chart--area .bar-chart__label {
+  fill: #64748b;
+  font-size: 11px;
+}
+
+/* flat white mode */
+.sidebar,
+.db-subnav__item.active,
+.teacher-report-chart,
+.teacher-payout-card,
+.student-collection-panel,
+.student-collection-panel--unpaid,
+.student-detail-kpi,
+.teacher-detail-kpi {
+  background: #ffffff !important;
+  box-shadow: none !important;
+}
+
+/* hard white background override */
+html,
+body,
+#root,
+.app-shell,
+.app-header,
+.page-shell,
+.layout-shell,
+.page-panel,
+.page-panel__header,
+.page-panel__body,
+.section-card,
+.section-card__body,
+.main-panel,
+.db-workspace,
+.dash-board,
+.dash-chart-panel,
+.kpi-card,
+.table-wrap,
+.student-collection-panel,
+.student-collection-panel--unpaid,
+.teacher-report-chart,
+.teacher-payout-card,
+.modal-panel,
+.settlement-modal,
+.settlement-modal__body {
+  background: #ffffff !important;
+}
+
 .students-layout > .section-card:first-child {
   grid-column: 1 / -1;
+}
+
+.student-collection-kpis {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.student-collection-sections {
+  display: grid;
+  gap: 14px;
+}
+
+.student-collection-panel {
+  border: none;
+  border-radius: 14px;
+  background: #f8fafc;
+  padding: 10px;
+}
+
+.student-collection-panel--unpaid {
+  background: #fff8f5;
+}
+
+.student-collection-panel__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 8px;
+  padding: 0 2px;
+}
+
+.student-collection-panel__head h4 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.student-collection-panel__head span {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.students-table-empty {
+  text-align: center !important;
+  color: #64748b;
+  padding: 16px 8px !important;
 }
 
 /* 데이터 등록 */
@@ -3215,6 +4350,7 @@ tbody tr:hover td {
 .register-tabs {
   display: inline-flex;
   gap: 6px;
+  margin-top: 14px;
   padding: 4px;
   border-radius: 10px;
   background: #f1f5f9;
@@ -3247,6 +4383,23 @@ tbody tr:hover td {
   background: #ffffff;
   border-color: #dbeafe;
   box-shadow: 0 1px 4px rgba(37, 99, 235, 0.12);
+}
+
+.teacher-email-edit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.teacher-email-edit input {
+  min-width: 220px;
+}
+
+.teacher-email-select-tools {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 10px;
+  font-size: 13px;
 }
 
 .register-section {
@@ -3284,6 +4437,42 @@ tbody tr:hover td {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
   gap: 14px;
+}
+
+/* dashboard visual polish */
+.dash-board .kpi-card {
+  background: #ffffff !important;
+  border: 1px solid #e2e8f0 !important;
+}
+
+.dash-board .kpi-card--revenue {
+  border-color: #d1d5db !important;
+  background: #ffffff !important;
+}
+
+.dash-board .dash-chart-panel {
+  background: #ffffff !important;
+  border: 1px solid #e2e8f0 !important;
+}
+
+.dash-board .dash-chart-panel--revenue {
+  border-color: #d1d5db !important;
+}
+
+/* table radius hard reset */
+.table-wrap,
+.table-wrap table,
+.settlement-overview-wrap,
+.settlement-overview-table,
+.catalog-table-wrap,
+.tuition-guide__table,
+.data-admin__table-scroll,
+.data-admin__table,
+.data-overview__table-wrap,
+.data-overview__table,
+.student-detail-modal .table-wrap,
+.teacher-detail-modal .table-wrap {
+  border-radius: 0 !important;
 }
 
 .register-field {

@@ -77,7 +77,7 @@ function Field({ label, hint, children, required }) {
   )
 }
 
-export default function DataRegisterView({ onRegistered }) {
+export default function DataRegisterView({ onRegistered, selectedMonth }) {
   const [options, setOptions] = useState(null)
   const [activeTab, setActiveTab] = useState('user')
   const [userForm, setUserForm] = useState(EMPTY_USER)
@@ -86,6 +86,9 @@ export default function DataRegisterView({ onRegistered }) {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [lastResult, setLastResult] = useState(null)
+  const [teacherStatusUpdatingId, setTeacherStatusUpdatingId] = useState(null)
+  const [teacherEmailUpdatingId, setTeacherEmailUpdatingId] = useState(null)
+  const [teacherEmailDrafts, setTeacherEmailDrafts] = useState({})
 
   const loadOptions = useCallback(async () => {
     const data = await apiRequest('/api/register/options')
@@ -95,6 +98,14 @@ export default function DataRegisterView({ onRegistered }) {
   useEffect(() => {
     loadOptions().catch((e) => setError(e.message))
   }, [loadOptions])
+
+  useEffect(() => {
+    const drafts = {}
+    for (const teacher of options?.teachers ?? []) {
+      drafts[teacher.id] = teacher.email ?? ''
+    }
+    setTeacherEmailDrafts(drafts)
+  }, [options])
 
   const selectedProduct = options?.products?.find((p) => String(p.id) === String(subForm.product_id))
 
@@ -169,19 +180,55 @@ export default function DataRegisterView({ onRegistered }) {
     }
   }
 
+  const handleTeacherStatusChange = async (teacherId, status) => {
+    setLoading(true)
+    setTeacherStatusUpdatingId(teacherId)
+    setError('')
+    setNotice('')
+    try {
+      await apiRequest(`/api/teachers/${teacherId}/status`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          status,
+          changed_month: selectedMonth || null,
+        }),
+      })
+      setNotice('선생님 상태를 변경했습니다.')
+      await loadOptions()
+      onRegistered?.()
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setTeacherStatusUpdatingId(null)
+      setLoading(false)
+    }
+  }
+
+  const handleTeacherEmailSave = async (teacherId) => {
+    setLoading(true)
+    setTeacherEmailUpdatingId(teacherId)
+    setError('')
+    setNotice('')
+    try {
+      await apiRequest(`/api/teachers/${teacherId}/email`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          email: teacherEmailDrafts[teacherId] ?? '',
+        }),
+      })
+      setNotice('선생님 이메일을 저장했습니다.')
+      await loadOptions()
+      onRegistered?.()
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setTeacherEmailUpdatingId(null)
+      setLoading(false)
+    }
+  }
+
   return (
     <div className="data-register">
-      <header className="data-register__intro">
-        <p>
-          새 데이터를 단계별로 등록합니다. 사용자 등록 시 역할에 따라 <strong>학생 프로필</strong> 또는{' '}
-          <strong>선생님 프로필</strong>이 함께 생성됩니다.
-        </p>
-        <p className="data-register__trial-note">
-          시범비는 학생에게 청구하지 않습니다. <strong>수업(lesson_enrollments)</strong>에 기록되고{' '}
-          <strong>선생님 정산(settlements)</strong>에만 반영됩니다. 월별 수납에는 넣지 않습니다.
-        </p>
-      </header>
-
       <div className="register-tabs">
         <button
           type="button"
@@ -196,6 +243,13 @@ export default function DataRegisterView({ onRegistered }) {
           onClick={() => setActiveTab('enrollment')}
         >
           수업 · 시범
+        </button>
+        <button
+          type="button"
+          className={activeTab === 'teacher-status' ? 'register-tab active' : 'register-tab'}
+          onClick={() => setActiveTab('teacher-status')}
+        >
+          선생님 상태 변경
         </button>
       </div>
 
@@ -309,7 +363,7 @@ export default function DataRegisterView({ onRegistered }) {
             </button>
           </div>
         </form>
-      ) : (
+      ) : activeTab === 'enrollment' ? (
         <form className="register-form" onSubmit={handleSubSubmit}>
           <FormSection title="수업 연결" description="lesson_enrollments · 학생과 선생님을 상품으로 연결합니다.">
             <div className="register-grid">
@@ -471,6 +525,77 @@ export default function DataRegisterView({ onRegistered }) {
             </button>
           </div>
         </form>
+      ) : (
+        <section className="register-form">
+          <FormSection
+            title="선생님 상태 변경"
+            description="정산 탭이 아니라 데이터 등록에서 선생님 active/종료 상태를 관리합니다."
+          >
+            <div className="table-wrap settlement-overview-wrap">
+              <table className="settlement-overview-table">
+                <thead>
+                  <tr>
+                    <th>선생님</th>
+                    <th>이메일</th>
+                    <th>현재 상태</th>
+                    <th>변경</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(options?.teachers ?? []).map((teacher) => (
+                    <tr key={teacher.id}>
+                      <td>
+                        <strong>{teacher.name}</strong>
+                      </td>
+                      <td>{teacher.status ?? 'active'}</td>
+                      <td>
+                        <div className="teacher-email-edit">
+                          <input
+                            type="email"
+                            value={teacherEmailDrafts[teacher.id] ?? ''}
+                            onChange={(e) =>
+                              setTeacherEmailDrafts((prev) => ({
+                                ...prev,
+                                [teacher.id]: e.target.value,
+                              }))
+                            }
+                            placeholder="teacher@example.com"
+                            disabled={loading && teacherEmailUpdatingId === teacher.id}
+                          />
+                          <button
+                            type="button"
+                            className="link-button"
+                            onClick={() => handleTeacherEmailSave(teacher.id)}
+                            disabled={loading && teacherEmailUpdatingId === teacher.id}
+                          >
+                            저장
+                          </button>
+                        </div>
+                      </td>
+                      <td>
+                        <select
+                          value={teacher.status ?? 'active'}
+                          onChange={(e) => handleTeacherStatusChange(teacher.id, e.target.value)}
+                          disabled={loading && teacherStatusUpdatingId === teacher.id}
+                        >
+                          <option value="active">active</option>
+                          <option value="ended">종료</option>
+                        </select>
+                      </td>
+                    </tr>
+                  ))}
+                  {(options?.teachers ?? []).length === 0 ? (
+                    <tr>
+                      <td colSpan={4} className="students-table-empty">
+                        등록된 선생님이 없습니다.
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+          </FormSection>
+        </section>
       )}
 
       {lastResult?.enrollment_id || lastResult?.user_id ? (

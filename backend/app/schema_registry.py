@@ -12,6 +12,7 @@ TABLE_REGISTRY: dict[str, dict[str, Any]] = {
         "layer": "core",
         "sheet": "boda.db",
         "search_fields": ["name", "role", "email"],
+        "search_hint": "이름·역할·이메일",
         "allow_create": True,
         "allow_delete": True,
         "columns": {
@@ -27,6 +28,7 @@ TABLE_REGISTRY: dict[str, dict[str, Any]] = {
         "layer": "core",
         "sheet": "boda.db",
         "search_fields": ["grade_level", "phone", "parent_name", "parent_phone"],
+        "search_hint": "학생 이름·학년·연락처·보호자명",
         "allow_create": True,
         "allow_delete": True,
         "columns": {
@@ -45,6 +47,7 @@ TABLE_REGISTRY: dict[str, dict[str, Any]] = {
         "layer": "core",
         "sheet": "boda.db",
         "search_fields": ["status", "phone", "education", "major"],
+        "search_hint": "선생님 이름·상태·연락처·전공",
         "allow_create": True,
         "allow_delete": True,
         "columns": {
@@ -171,8 +174,8 @@ TABLE_REGISTRY: dict[str, dict[str, Any]] = {
             "trial_fee": {"label": "시범비", "type": "integer"},
             "commission_rate": {"label": "수수료율", "type": "float"},
             "pre_tax_amount": {"label": "세전", "type": "integer"},
-            "withholding_rate": {"label": "원천세율", "type": "float"},
-            "withholding_amount": {"label": "원천세", "type": "integer"},
+            "withholding_rate": {"label": "정산 수수료율(%)", "type": "float"},
+            "withholding_amount": {"label": "정산 수수료", "type": "integer"},
             "net_amount": {"label": "지급액", "type": "integer"},
             "status": {"label": "상태", "type": "text"},
             "settled_at": {"label": "정산일", "type": "text"},

@@ -545,7 +545,7 @@ export default function App() {
         <div className="app-header__inner">
           <div className="brand-block">
             <div className="brand-mark" aria-hidden="true">
-              B
+              <img src="/logo.svg" alt="" className="brand-logo" />
             </div>
             <div className="brand-text">
               <strong>보다수학</strong>

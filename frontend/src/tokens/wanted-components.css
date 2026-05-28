@@ -73,32 +73,37 @@
 
 /* DB subnav */
 .db-subnav {
-  gap: var(--wanted-space-2);
-  padding: var(--wanted-space-1);
-  border-radius: var(--wanted-radius-md);
-  background: var(--wanted-fill-normal);
-  border-color: var(--wanted-line-solid);
+  gap: 0;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid #111827;
 }
 
 .db-subnav__item:hover {
-  border-color: var(--wanted-line-solid);
+  border-bottom-color: #111827;
 }
 
 .db-subnav__item.active {
-  border-color: var(--wanted-blue-200);
-  box-shadow: var(--wanted-shadow-sm);
+  border-color: transparent;
+  border-bottom-color: #111827;
+  box-shadow: none;
 }
 
 .db-subnav__label {
-  color: var(--app-color-text-strong);
+  color: #9ca3af;
 }
 
 .db-subnav__item.active .db-subnav__label {
-  color: var(--app-color-primary-strong);
+  color: #111827;
 }
 
 .db-subnav__desc {
-  color: var(--app-color-text-muted);
+  display: block;
+  color: #9ca3af;
+  font-size: 11px;
+  line-height: 1.2;
 }
 
 /* Buttons — Wanted Action / Solid */

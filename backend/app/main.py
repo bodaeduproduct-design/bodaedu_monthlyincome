@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import date
+import os
+import smtplib
+from email.message import EmailMessage
 from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy import func, text
+from sqlalchemy.orm import Session, aliased
 
 from .database import Base, engine, get_db
 from .models import (
@@ -24,7 +27,12 @@ from .models import (
 from .db_schema_migrate import apply_table_renames
 from .billing_sync import sync_all_trial_enrollments
 from .enrollment_billing import resolve_next_billing, sync_all_next_billing
-from .settlement_sync import sync_settlements_from_payments
+from .settlement_detail import build_teacher_settlement_detail
+from .settlement_sync import (
+    SETTLEMENT_FEE_MULTIPLIER,
+    prune_settlements_without_payments,
+    sync_settlements_from_payments,
+)
 from .payment_record_sync import sync_monthly_payment_records_from_enrollments
 from .schema_registry import get_all_schemas, list_table_names
 from .registration import TRIAL_FEE_AMOUNT, list_register_options, register_enrollment, register_user
@@ -69,6 +77,27 @@ class RegisterEnrollmentPayload(BaseModel):
     next_billing: Optional[str] = None
 
 
+class TeacherStatusPayload(BaseModel):
+    status: str
+    changed_month: Optional[str] = None
+
+
+class PaymentStatusPayload(BaseModel):
+    billing_month: str
+    student_id: int
+    teacher_id: Optional[int] = None
+    payment_status: str
+
+
+class TeacherEmailPayload(BaseModel):
+    email: Optional[str] = None
+
+
+class SettlementEmailSendPayload(BaseModel):
+    billing_month: str
+    teacher_ids: Optional[list[int]] = None
+
+
 def _safe_int(value: Any) -> int:
     try:
         return int(value or 0)
@@ -98,6 +127,18 @@ def _month_add(billing_month: str, delta: int) -> Optional[str]:
     return f"{year:04d}-{month:02d}"
 
 
+def _normalize_month(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    text_value = str(value).strip()
+    if len(text_value) >= 7 and text_value[4] == "-":
+        return text_value[:7]
+    parsed = _parse_date_only(text_value)
+    if parsed:
+        return f"{parsed.year:04d}-{parsed.month:02d}"
+    return None
+
+
 def _sum_lesson_revenue(db: Session, billing_month: str) -> int:
     return _safe_int(
         db.query(func.coalesce(func.sum(MonthlyPaymentRecord.final_amount), 0))
@@ -120,6 +161,24 @@ def _sum_settlement_pre_tax(db: Session, billing_month: str) -> int:
         .filter(Settlement.billing_month == billing_month)
         .scalar()
     )
+
+
+def _sum_teacher_share_pre_tax_from_payments(db: Session, billing_month: str) -> int:
+    value = (
+        db.query(
+            func.coalesce(
+                func.sum(
+                    MonthlyPaymentRecord.final_amount
+                    * func.coalesce(MonthlyPaymentRecord.commission_rate, 60.0)
+                    / 100.0
+                ),
+                0.0,
+            )
+        )
+        .filter(MonthlyPaymentRecord.billing_month == billing_month)
+        .scalar()
+    )
+    return int(round(float(value or 0.0)))
 
 
 def _sum_settlement_trial_fee(db: Session, billing_month: str) -> int:
@@ -148,6 +207,51 @@ def _sum_trial_fee_for_month(db: Session, billing_month: str) -> int:
     return _sum_settlement_trial_fee(db, billing_month)
 
 
+def _sum_teacher_enrollment_trial_fee(db: Session, teacher_id: int, billing_month: str) -> int:
+    return _safe_int(
+        db.query(func.coalesce(func.sum(LessonEnrollment.trial_fee), 0))
+        .filter(
+            LessonEnrollment.teacher_id == teacher_id,
+            LessonEnrollment.trial_month == billing_month,
+            LessonEnrollment.trial_fee > 0,
+        )
+        .scalar()
+    )
+
+
+def _trial_net_portion(row: Settlement) -> int:
+    """정산 행에서 시범비 몫의 순지급 — monthly/per_session에 trial_fee가 합쳐진 경우 비율 분리."""
+    settlement_type = str(row.settlement_type or "")
+    trial_fee = _safe_int(row.trial_fee)
+    pre_tax = _safe_int(row.pre_tax_amount)
+    net = _safe_int(row.net_amount)
+    if settlement_type == "trial":
+        return net
+    if trial_fee <= 0:
+        return 0
+    if pre_tax > 0:
+        return int(round(net * trial_fee / pre_tax))
+    return net if trial_fee > 0 else 0
+
+
+def _teacher_trial_totals_for_month(db: Session, teacher_id: int, billing_month: str) -> tuple[int, int]:
+    """(시범비 합계, 시범 순지급) — settlements 병합 행 + 수업 등록 fallback."""
+    settlement_rows = (
+        db.query(Settlement)
+        .filter(Settlement.teacher_id == teacher_id, Settlement.billing_month == billing_month)
+        .all()
+    )
+    trial_fee = sum(_safe_int(r.trial_fee) for r in settlement_rows)
+    trial_net = sum(_trial_net_portion(r) for r in settlement_rows)
+
+    if trial_fee <= 0:
+        enroll_fee = _sum_teacher_enrollment_trial_fee(db, teacher_id, billing_month)
+        if enroll_fee > 0:
+            trial_fee = enroll_fee
+            trial_net = int(round(enroll_fee * SETTLEMENT_FEE_MULTIPLIER))
+    return trial_fee, trial_net
+
+
 def _lesson_revenue_split(db: Session, billing_month: str) -> dict[str, int]:
     rows = (
         db.query(
@@ -169,19 +273,289 @@ def _lesson_revenue_split(db: Session, billing_month: str) -> dict[str, int]:
     return {"total": total, "monthly": monthly, "per_session": per_session, "has_lesson_data": total > 0}
 
 
-def _active_counts(db: Session, billing_month: str) -> dict[str, int]:
+def _student_ids_from_payments(db: Session, billing_month: str, *, teacher_id: Optional[int] = None) -> set[int]:
+    q = db.query(MonthlyPaymentRecord.student_id).filter(MonthlyPaymentRecord.billing_month == billing_month)
+    if teacher_id is not None:
+        q = q.filter(MonthlyPaymentRecord.teacher_id == teacher_id)
+    return {int(row[0]) for row in q.distinct().all() if row[0] is not None}
+
+
+def _student_ids_from_trials(db: Session, billing_month: str, *, teacher_id: Optional[int] = None) -> set[int]:
+    q = db.query(LessonEnrollment.student_id).filter(
+        LessonEnrollment.trial_month == billing_month,
+        LessonEnrollment.trial_fee > 0,
+    )
+    if teacher_id is not None:
+        q = q.filter(LessonEnrollment.teacher_id == teacher_id)
+    return {int(row[0]) for row in q.distinct().all() if row[0] is not None}
+
+
+def _teacher_month_billing_counts(db: Session, teacher_id: int, billing_month: str) -> dict[str, int]:
+    """선생님·월 기준 청구(수납) 학생 수 + 시범 학생 수."""
+    billing_students = _student_ids_from_payments(db, billing_month, teacher_id=teacher_id)
+    trial_students = _student_ids_from_trials(db, billing_month, teacher_id=teacher_id)
+    payment_rows = (
+        db.query(func.count(MonthlyPaymentRecord.id))
+        .filter(
+            MonthlyPaymentRecord.teacher_id == teacher_id,
+            MonthlyPaymentRecord.billing_month == billing_month,
+        )
+        .scalar()
+    )
     return {
-        "active_student_count": _safe_int(
-            db.query(func.count(func.distinct(MonthlyPaymentRecord.student_id)))
-            .filter(MonthlyPaymentRecord.billing_month == billing_month)
-            .scalar()
-        ),
-        "active_teacher_count": _safe_int(
-            db.query(func.count(func.distinct(MonthlyPaymentRecord.teacher_id)))
-            .filter(MonthlyPaymentRecord.billing_month == billing_month)
-            .scalar()
-        ),
+        "payment_record_count": _safe_int(payment_rows),
+        "billing_student_count": len(billing_students),
+        "trial_student_count": len(trial_students),
+        "trial_only_student_count": len(trial_students - billing_students),
+        "total_student_count": len(billing_students | trial_students),
     }
+
+
+def _teacher_net_by_unit_from_payments(db: Session, teacher_id: int, billing_month: str) -> dict[str, int]:
+    rows = (
+        db.query(
+            MonthlyPaymentRecord.billing_unit,
+            func.coalesce(func.sum(MonthlyPaymentRecord.final_amount), 0),
+            func.coalesce(
+                func.sum(
+                    MonthlyPaymentRecord.final_amount
+                    * func.coalesce(MonthlyPaymentRecord.commission_rate, 60.0)
+                    / 100.0
+                ),
+                0.0,
+            ),
+        )
+        .filter(
+            MonthlyPaymentRecord.teacher_id == teacher_id,
+            MonthlyPaymentRecord.billing_month == billing_month,
+        )
+        .group_by(MonthlyPaymentRecord.billing_unit)
+        .all()
+    )
+    monthly_gross = 0
+    per_session_gross = 0
+    monthly_net = 0
+    per_session_net = 0
+    for unit, gross_sum, pre_tax_sum in rows:
+        gross = _safe_int(gross_sum)
+        pre_tax = int(round(float(pre_tax_sum or 0.0)))
+        net = int(round(pre_tax * SETTLEMENT_FEE_MULTIPLIER))
+        if unit == "per_session":
+            per_session_gross += gross
+            per_session_net += net
+        else:
+            monthly_gross += gross
+            monthly_net += net
+    return {
+        "monthly_gross_amount": monthly_gross,
+        "per_session_gross_amount": per_session_gross,
+        "monthly_net_amount": monthly_net,
+        "per_session_net_amount": per_session_net,
+    }
+
+
+def _active_counts(db: Session, billing_month: str) -> dict[str, int]:
+    billing_students = _student_ids_from_payments(db, billing_month)
+    trial_students = _student_ids_from_trials(db, billing_month)
+    teacher_ids = {
+        int(row[0])
+        for row in db.query(MonthlyPaymentRecord.teacher_id)
+        .filter(MonthlyPaymentRecord.billing_month == billing_month)
+        .distinct()
+        .all()
+        if row[0] is not None
+    }
+    teacher_ids.update(
+        int(row[0])
+        for row in db.query(LessonEnrollment.teacher_id)
+        .filter(LessonEnrollment.trial_month == billing_month, LessonEnrollment.trial_fee > 0)
+        .distinct()
+        .all()
+        if row[0] is not None
+    )
+    return {
+        "active_student_count": len(billing_students | trial_students),
+        "billing_student_count": len(billing_students),
+        "trial_student_count": len(trial_students),
+        "active_teacher_count": len(teacher_ids),
+    }
+
+
+def _student_user_created_count(db: Session, billing_month: str) -> int:
+    rows = (
+        db.query(User.created_at)
+        .join(StudentProfile, StudentProfile.user_id == User.id)
+        .all()
+    )
+    return sum(1 for (created_at,) in rows if _normalize_month(created_at) == billing_month)
+
+
+def _trial_count_for_month(db: Session, billing_month: str) -> int:
+    rows = db.query(LessonEnrollment.trial_date).all()
+    return sum(1 for (trial_date,) in rows if _normalize_month(trial_date) == billing_month)
+
+
+def _new_first_payment_student_count(db: Session, billing_month: str) -> int:
+    student_first_month: dict[int, str] = {}
+    rows = db.query(MonthlyPaymentRecord.student_id, MonthlyPaymentRecord.billing_month).all()
+    for student_id, month in rows:
+        if student_id is None or not month:
+            continue
+        sid = int(student_id)
+        current = student_first_month.get(sid)
+        if current is None or str(month) < current:
+            student_first_month[sid] = str(month)
+    return sum(1 for month in student_first_month.values() if month == billing_month)
+
+
+def _student_exit_count(db: Session, billing_month: str) -> int:
+    rows = db.query(LessonEnrollment.student_id, LessonEnrollment.end_date).all()
+    exited_students: set[int] = set()
+    for student_id, end_date in rows:
+        if student_id is None:
+            continue
+        if _normalize_month(end_date) == billing_month:
+            exited_students.add(int(student_id))
+    return len(exited_students)
+
+
+def _dashboard_student_lists(db: Session, billing_month: str) -> dict[str, Any]:
+    student_user = aliased(User)
+    teacher_user = aliased(User)
+    payment_rows = db.query(MonthlyPaymentRecord.student_id, MonthlyPaymentRecord.billing_month).all()
+    first_month_by_student: dict[int, str] = {}
+    for student_id, month in payment_rows:
+        if student_id is None or not month:
+            continue
+        sid = int(student_id)
+        current = first_month_by_student.get(sid)
+        if current is None or str(month) < current:
+            first_month_by_student[sid] = str(month)
+    new_ids = [sid for sid, first_month in first_month_by_student.items() if first_month == billing_month]
+    new_items: list[dict[str, Any]] = []
+    if new_ids:
+        new_detail_rows = (
+            db.query(
+                StudentProfile.id,
+                student_user.name,
+                TeacherProfile.id,
+                teacher_user.name,
+                Product.name,
+            )
+            .join(student_user, student_user.id == StudentProfile.user_id)
+            .join(LessonEnrollment, LessonEnrollment.student_id == StudentProfile.id)
+            .outerjoin(TeacherProfile, TeacherProfile.id == LessonEnrollment.teacher_id)
+            .outerjoin(teacher_user, teacher_user.id == TeacherProfile.user_id)
+            .outerjoin(Product, Product.id == LessonEnrollment.product_id)
+            .filter(StudentProfile.id.in_(new_ids))
+            .order_by(student_user.name.asc(), StudentProfile.id.asc(), LessonEnrollment.id.asc())
+            .all()
+        )
+        new_map: dict[int, dict[str, Any]] = {}
+        for student_id, student_name, _teacher_id, teacher_name, product_name in new_detail_rows:
+            sid = int(student_id)
+            row = new_map.get(sid)
+            if not row:
+                row = {
+                    "student_id": sid,
+                    "student_name": student_name,
+                    "teachers": [],
+                    "products": [],
+                }
+                new_map[sid] = row
+            if teacher_name and teacher_name not in row["teachers"]:
+                row["teachers"].append(teacher_name)
+            if product_name and product_name not in row["products"]:
+                row["products"].append(product_name)
+        new_items = sorted(new_map.values(), key=lambda x: (x["student_name"], x["student_id"]))
+
+    ended_rows = db.query(LessonEnrollment.student_id, LessonEnrollment.end_date).all()
+    ended_ids: set[int] = set()
+    for student_id, end_date in ended_rows:
+        if student_id is None:
+            continue
+        if _normalize_month(end_date) == billing_month:
+            ended_ids.add(int(student_id))
+    ended_items: list[dict[str, Any]] = []
+    if ended_ids:
+        ended_detail_rows = (
+            db.query(
+                StudentProfile.id,
+                student_user.name,
+                TeacherProfile.id,
+                teacher_user.name,
+                Product.name,
+            )
+            .join(student_user, student_user.id == StudentProfile.user_id)
+            .join(LessonEnrollment, LessonEnrollment.student_id == StudentProfile.id)
+            .outerjoin(TeacherProfile, TeacherProfile.id == LessonEnrollment.teacher_id)
+            .outerjoin(teacher_user, teacher_user.id == TeacherProfile.user_id)
+            .outerjoin(Product, Product.id == LessonEnrollment.product_id)
+            .filter(StudentProfile.id.in_(list(ended_ids)))
+            .filter(func.substr(func.coalesce(LessonEnrollment.end_date, ""), 1, 7) == billing_month)
+            .order_by(student_user.name.asc(), StudentProfile.id.asc(), LessonEnrollment.id.asc())
+            .all()
+        )
+        ended_map: dict[int, dict[str, Any]] = {}
+        for student_id, student_name, _teacher_id, teacher_name, product_name in ended_detail_rows:
+            sid = int(student_id)
+            row = ended_map.get(sid)
+            if not row:
+                row = {
+                    "student_id": sid,
+                    "student_name": student_name,
+                    "teachers": [],
+                    "products": [],
+                }
+                ended_map[sid] = row
+            if teacher_name and teacher_name not in row["teachers"]:
+                row["teachers"].append(teacher_name)
+            if product_name and product_name not in row["products"]:
+                row["products"].append(product_name)
+        ended_items = sorted(ended_map.values(), key=lambda x: (x["student_name"], x["student_id"]))
+
+    return {
+        "billing_month": billing_month,
+        "new_students": new_items,
+        "ended_students": ended_items,
+    }
+
+
+def _active_teacher_profile_count(db: Session) -> int:
+    return _safe_int(
+        db.query(func.count(TeacherProfile.id))
+        .filter(func.lower(func.coalesce(TeacherProfile.status, "active")) == "active")
+        .scalar()
+    )
+
+
+def _teacher_ended_count_for_month(db: Session, billing_month: str) -> int:
+    rows = db.query(TeacherProfile.status, TeacherProfile.status_changed_at).all()
+    ended = 0
+    for status, changed_at in rows:
+        if str(status or "").lower() != "ended":
+            continue
+        if _normalize_month(changed_at) == billing_month:
+            ended += 1
+    return ended
+
+
+def _payment_status_counts(db: Session, billing_month: str) -> dict[str, int]:
+    rows = (
+        db.query(MonthlyPaymentRecord.payment_status, func.count(MonthlyPaymentRecord.id))
+        .filter(MonthlyPaymentRecord.billing_month == billing_month)
+        .group_by(MonthlyPaymentRecord.payment_status)
+        .all()
+    )
+    paid = 0
+    unpaid = 0
+    for status, count in rows:
+        normalized = str(status or "paid").lower()
+        if normalized == "paid":
+            paid += _safe_int(count)
+        else:
+            unpaid += _safe_int(count)
+    return {"paid_count": paid, "unpaid_count": unpaid, "total_count": paid + unpaid}
 
 
 def _settlement_gross_split(db: Session, billing_month: str) -> dict[str, int]:
@@ -219,8 +593,9 @@ def _build_dashboard_for_month(db: Session, billing_month: str) -> dict[str, Any
         monthly_revenue = lesson["monthly"]
         per_session_revenue = lesson["per_session"]
 
-    teacher_settlement = _sum_settlement_pre_tax(db, billing_month)
+    teacher_settlement = _sum_teacher_share_pre_tax_from_payments(db, billing_month)
     trial_fee = _sum_trial_fee_for_month(db, billing_month)
+    teacher_settlement += trial_fee
     # 순매출 = 학생 수납(총매출) - 선생님 정산(세전, 시범수업비 포함) 
     net_revenue = gross_revenue - teacher_settlement
 
@@ -234,6 +609,18 @@ def _build_dashboard_for_month(db: Session, billing_month: str) -> dict[str, Any
     revenue_delta_rate = round((revenue_delta / prev_gross) * 100, 1) if prev_gross else None
 
     active = _active_counts(db, billing_month)
+    prev_active = _active_counts(db, prev_month) if prev_month else {"active_student_count": 0, "active_teacher_count": 0}
+    student_created = _student_user_created_count(db, billing_month)
+    trial_count = _trial_count_for_month(db, billing_month)
+    first_payment_new = _new_first_payment_student_count(db, billing_month)
+    prev_student_created = _student_user_created_count(db, prev_month) if prev_month else 0
+    inquiry_delta = student_created - prev_student_created
+    student_exit = _student_exit_count(db, billing_month)
+    student_delta = active["active_student_count"] - _safe_int(prev_active.get("active_student_count"))
+    active_teacher_total = _active_teacher_profile_count(db)
+    teacher_ended = _teacher_ended_count_for_month(db, billing_month)
+    teacher_delta = active["active_teacher_count"] - _safe_int(prev_active.get("active_teacher_count"))
+    payment_counts = _payment_status_counts(db, billing_month)
 
     return {
         "billing_month": billing_month,
@@ -246,10 +633,23 @@ def _build_dashboard_for_month(db: Session, billing_month: str) -> dict[str, Any
         "net_revenue": net_revenue,
         "active_student_count": active["active_student_count"],
         "active_teacher_count": active["active_teacher_count"],
+        "active_teacher_total": active_teacher_total,
+        "teacher_ended_count": teacher_ended,
         "prev_month": prev_month,
         "prev_gross_revenue": prev_gross,
         "revenue_delta": revenue_delta,
         "revenue_delta_rate": revenue_delta_rate,
+        "new_inquiry_count": student_created,
+        "new_first_payment_count": first_payment_new,
+        "trial_lesson_count": trial_count,
+        "inquiry_delta": inquiry_delta,
+        "student_new_count": first_payment_new,
+        "student_exit_count": student_exit,
+        "student_delta": student_delta,
+        "teacher_delta": teacher_delta,
+        "paid_count": payment_counts["paid_count"],
+        "unpaid_count": payment_counts["unpaid_count"],
+        "collection_count": payment_counts["total_count"],
     }
 
 
@@ -268,13 +668,20 @@ def _build_six_month_trends(db: Session, anchor_month: str) -> dict[str, list[di
     trend_months = _last_n_months(anchor_month, 6)
     revenue_trend = []
     student_trend = []
+    inquiry_trend = []
     for month in trend_months:
         lesson = _lesson_revenue_split(db, month)
         gross = lesson["total"] if lesson["has_lesson_data"] else _settlement_gross_split(db, month)["total"]
         active = _active_counts(db, month)
+        inquiry_count = _student_user_created_count(db, month)
         revenue_trend.append({"month": month, "gross_revenue": gross})
         student_trend.append({"month": month, "student_count": active["active_student_count"]})
-    return {"revenue_trend_6m": revenue_trend, "student_trend_6m": student_trend}
+        inquiry_trend.append({"month": month, "inquiry_count": inquiry_count})
+    return {
+        "revenue_trend_6m": revenue_trend,
+        "student_trend_6m": student_trend,
+        "inquiry_trend_6m": inquiry_trend,
+    }
 
 
 def _payment_methods_for_month(db: Session, billing_month: str) -> list[dict[str, Any]]:
@@ -320,10 +727,61 @@ def _teacher_name_by_profile_id(db: Session, teacher_profile_id: int) -> str:
     return fallback or f"teacher#{teacher_profile_id}"
 
 
+def _student_name_by_profile_id(db: Session, student_profile_id: int) -> str:
+    name = (
+        db.query(User.name)
+        .join(StudentProfile, StudentProfile.user_id == User.id)
+        .filter(StudentProfile.id == student_profile_id)
+        .scalar()
+    )
+    if name:
+        return name
+    fallback = db.query(User.name).filter(User.id == student_profile_id).scalar()
+    return fallback or f"student#{student_profile_id}"
+
+
 def _ensure_schema() -> None:
     # boda.db는 이미 테이블이 존재하지만, 로컬 개발 환경에서 누락 시 생성되도록 유지합니다.
     apply_table_renames(engine)
     Base.metadata.create_all(bind=engine)
+    with engine.begin() as conn:
+        payment_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(monthly_payment_records)")).fetchall()}
+        if "payment_status" not in payment_cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE monthly_payment_records "
+                    "ADD COLUMN payment_status TEXT DEFAULT 'paid'"
+                )
+            )
+        conn.execute(
+            text(
+                "UPDATE monthly_payment_records "
+                "SET payment_status = CASE "
+                "WHEN billing_month <= '2026-05' THEN 'paid' "
+                "ELSE 'unpaid' "
+                "END "
+                "WHERE payment_status IS NULL OR payment_status = ''"
+            )
+        )
+        conn.execute(
+            text(
+                "UPDATE monthly_payment_records "
+                "SET payment_status = 'paid' "
+                "WHERE billing_month <= '2026-05'"
+            )
+        )
+        conn.execute(
+            text(
+                "UPDATE monthly_payment_records "
+                "SET payment_status = 'unpaid' "
+                "WHERE billing_month > '2026-05'"
+            )
+        )
+
+        teacher_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(teacher_profiles)")).fetchall()}
+        if "status_changed_at" not in teacher_cols:
+            conn.execute(text("ALTER TABLE teacher_profiles ADD COLUMN status_changed_at TEXT"))
+
     # 수업에만 있고 정산에 없는 시범 데이터 보정
     from .database import SessionLocal
 
@@ -333,6 +791,7 @@ def _ensure_schema() -> None:
         sync_monthly_payment_records_from_enrollments(db)
         # 월별 수납 → 선생님 정산 자동 갱신 (월별/회당)
         sync_settlements_from_payments(db)
+        prune_settlements_without_payments(db)
         sync_all_trial_enrollments(db)
         sync_all_next_billing(db)
         db.commit()
@@ -399,6 +858,23 @@ def dashboard(month: Optional[str] = None, db: Session = Depends(get_db)):
         "summary": summary,
         **trends,
     }
+
+
+@app.get("/api/dashboard/student-lists")
+def dashboard_student_lists(month: Optional[str] = None, db: Session = Depends(get_db)):
+    months = [
+        row[0]
+        for row in db.query(MonthlyPaymentRecord.billing_month)
+        .distinct()
+        .order_by(MonthlyPaymentRecord.billing_month.desc())
+        .all()
+        if row[0]
+    ]
+    if not month:
+        month = months[0] if months else None
+    if not month:
+        return {"billing_month": None, "active_students": [], "new_students": [], "ended_students": []}
+    return _dashboard_student_lists(db, month)
 
 
 @app.get("/api/students/payment-summary")
@@ -713,6 +1189,11 @@ def list_teacher_settlements(month: Optional[str] = None, db: Session = Depends(
     - items: settlement_type별 행
     - aggregated: 선생님별 월별+회당 합산
     """
+    rate_adjustments = {"billing_month": month, "changed_count": 0, "changed_teachers": []}
+    if month:
+        rate_adjustments = _auto_adjust_commission_rates_for_month(db, month)
+        db.commit()
+
     q = db.query(
         Settlement.billing_month,
         Settlement.teacher_id,
@@ -746,10 +1227,21 @@ def list_teacher_settlements(month: Optional[str] = None, db: Session = Depends(
         )
         key = (billing_month, teacher_id)
         if key not in aggregated_map:
+            teacher_status = (
+                db.query(TeacherProfile.status).filter(TeacherProfile.id == teacher_id).scalar() or "active"
+            )
+            teacher_email = (
+                db.query(User.email)
+                .join(TeacherProfile, TeacherProfile.user_id == User.id)
+                .filter(TeacherProfile.id == teacher_id)
+                .scalar()
+            )
             aggregated_map[key] = {
                 "billing_month": billing_month,
                 "teacher_id": teacher_id,
                 "teacher_name": name,
+                "teacher_email": teacher_email,
+                "teacher_status": str(teacher_status).lower(),
                 "gross_amount": 0,
                 "trial_fee": 0,
                 "net_amount": 0,
@@ -768,8 +1260,56 @@ def list_teacher_settlements(month: Optional[str] = None, db: Session = Depends(
         elif settlement_type == "trial":
             agg["trial_net_amount"] += net_i
 
+    # 시범만 있는 선생님(정산 행 없음)도 목록에 포함
+    if month:
+        trial_teacher_ids = [
+            int(r[0])
+            for r in db.query(LessonEnrollment.teacher_id)
+            .filter(LessonEnrollment.trial_month == month, LessonEnrollment.trial_fee > 0)
+            .distinct()
+            .all()
+            if r[0] is not None
+        ]
+        for teacher_id in trial_teacher_ids:
+            key = (month, teacher_id)
+            if key not in aggregated_map:
+                teacher_status = (
+                    db.query(TeacherProfile.status).filter(TeacherProfile.id == teacher_id).scalar() or "active"
+                )
+                teacher_email = (
+                    db.query(User.email)
+                    .join(TeacherProfile, TeacherProfile.user_id == User.id)
+                    .filter(TeacherProfile.id == teacher_id)
+                    .scalar()
+                )
+                aggregated_map[key] = {
+                    "billing_month": month,
+                    "teacher_id": teacher_id,
+                    "teacher_name": _teacher_name_by_profile_id(db, teacher_id),
+                    "teacher_email": teacher_email,
+                    "teacher_status": str(teacher_status).lower(),
+                    "gross_amount": 0,
+                    "trial_fee": 0,
+                    "net_amount": 0,
+                    "monthly_net_amount": 0,
+                    "per_session_net_amount": 0,
+                    "trial_net_amount": 0,
+                }
+
+    for key, agg in aggregated_map.items():
+        billing_month, teacher_id = key
+        trial_fee, trial_net = _teacher_trial_totals_for_month(db, int(teacher_id), str(billing_month))
+        recalculated = _teacher_net_by_unit_from_payments(db, int(teacher_id), str(billing_month))
+        agg["monthly_net_amount"] = recalculated["monthly_net_amount"]
+        agg["per_session_net_amount"] = recalculated["per_session_net_amount"]
+        agg["gross_amount"] = recalculated["monthly_gross_amount"] + recalculated["per_session_gross_amount"]
+        agg["trial_fee"] = trial_fee
+        agg["trial_net_amount"] = trial_net
+        agg["net_amount"] = agg["monthly_net_amount"] + agg["per_session_net_amount"] + trial_net
+        agg.update(_teacher_month_billing_counts(db, int(teacher_id), str(billing_month)))
+
     aggregated = sorted(aggregated_map.values(), key=lambda row: row["net_amount"], reverse=True)
-    return {"items": items, "aggregated": aggregated}
+    return {"items": items, "aggregated": aggregated, "rate_adjustments": rate_adjustments}
 
 
 @app.get("/api/teachers/{teacher_id}/settlements")
@@ -789,73 +1329,17 @@ def teacher_settlement_months(teacher_id: int, db: Session = Depends(get_db)):
 
 @app.get("/api/teachers/{teacher_id}/settlements/{billing_month}")
 def teacher_settlement_detail(teacher_id: int, billing_month: str, db: Session = Depends(get_db)):
-    """
-    선생님 상세 정산 페이지용.\n
-    - settlements(월별결제/회당결제) 합계\n
-    - monthly_payment_records 상세(있을 경우)\n
-    - refund_requests(있을 경우)\n
-    """
+    """선생님 상세 정산 — 정규/시범 분리, 수수료·세전·원천세·최종 지급 경로."""
     teacher_name = _teacher_name_by_profile_id(db, teacher_id)
+    if not teacher_name or teacher_name.startswith("teacher#"):
+        return {"detail": "선생님을 찾을 수 없습니다."}
 
-    settlement_lines = (
-        db.query(
-            Settlement.settlement_type,
-            func.coalesce(func.sum(Settlement.gross_amount), 0),
-            func.coalesce(func.sum(Settlement.trial_fee), 0),
-            func.coalesce(func.sum(Settlement.net_amount), 0),
-        )
-        .filter(Settlement.teacher_id == teacher_id, Settlement.billing_month == billing_month)
-        .group_by(Settlement.settlement_type)
-        .all()
+    detail = build_teacher_settlement_detail(
+        db,
+        teacher_id=teacher_id,
+        billing_month=billing_month,
+        teacher_name=teacher_name,
     )
-    settlement_summary = [
-        {
-            "settlement_type": settlement_type,
-            "gross_amount": _safe_int(gross_sum),
-            "trial_fee": _safe_int(trial_sum),
-            "net_amount": _safe_int(net_sum),
-        }
-        for settlement_type, gross_sum, trial_sum, net_sum in settlement_lines
-    ]
-
-    # 수업 레코드 상세 (현재 샘플 DB는 0건일 수 있음)
-    lesson_rows = (
-        db.query(MonthlyPaymentRecord)
-        .filter(MonthlyPaymentRecord.teacher_id == teacher_id, MonthlyPaymentRecord.billing_month == billing_month)
-        .order_by(MonthlyPaymentRecord.id.asc())
-        .all()
-    )
-    lesson_items = []
-    for row in lesson_rows:
-        student_name = (
-            db.query(User.name)
-            .join(StudentProfile, StudentProfile.user_id == User.id)
-            .filter(StudentProfile.id == row.student_id)
-            .scalar()
-        )
-        product_name = (
-            db.query(Product.name)
-            .join(LessonEnrollment, LessonEnrollment.product_id == Product.id)
-            .filter(LessonEnrollment.id == row.enrollment_id)
-            .scalar()
-        )
-        lesson_items.append(
-            {
-                "id": row.id,
-                "student_id": row.student_id,
-                "student_name": student_name,
-                "enrollment_id": row.enrollment_id,
-                "billing_unit": row.billing_unit,
-                "product_name": product_name,
-                "total_sessions": row.total_sessions,
-                "completed_sessions": row.completed_sessions,
-                "final_amount": row.final_amount,
-                "trial_fee": row.trial_fee,
-                "refund_amount": row.refund_amount,
-                "payment_tag": row.payment_tag,
-                "memo": row.memo,
-            }
-        )
 
     refund_rows = (
         db.query(RefundRequest)
@@ -863,7 +1347,7 @@ def teacher_settlement_detail(teacher_id: int, billing_month: str, db: Session =
         .order_by(RefundRequest.id.asc())
         .all()
     )
-    refund_items = [
+    detail["refund_requests"] = [
         {
             "id": r.id,
             "enrollment_id": r.enrollment_id,
@@ -874,14 +1358,163 @@ def teacher_settlement_detail(teacher_id: int, billing_month: str, db: Session =
         }
         for r in refund_rows
     ]
+    return detail
+
+
+@app.patch("/api/teachers/{teacher_id}/status")
+def update_teacher_status(teacher_id: int, payload: TeacherStatusPayload, db: Session = Depends(get_db)):
+    teacher = db.query(TeacherProfile).filter(TeacherProfile.id == teacher_id).first()
+    if not teacher:
+        raise HTTPException(status_code=404, detail="선생님을 찾을 수 없습니다.")
+    normalized_status = str(payload.status or "").strip().lower()
+    if normalized_status not in {"active", "ended"}:
+        raise HTTPException(status_code=400, detail="status는 active 또는 ended 이어야 합니다.")
+    teacher.status = normalized_status
+    if normalized_status == "ended":
+        teacher.status_changed_at = f"{payload.changed_month or date.today().strftime('%Y-%m')}-01"
+    else:
+        teacher.status_changed_at = None
+    db.commit()
+    return {"ok": True, "teacher_id": teacher_id, "status": teacher.status, "status_changed_at": teacher.status_changed_at}
+
+
+@app.patch("/api/teachers/{teacher_id}/email")
+def update_teacher_email(teacher_id: int, payload: TeacherEmailPayload, db: Session = Depends(get_db)):
+    teacher = db.query(TeacherProfile).filter(TeacherProfile.id == teacher_id).first()
+    if not teacher:
+        raise HTTPException(status_code=404, detail="선생님을 찾을 수 없습니다.")
+    user = db.query(User).filter(User.id == teacher.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="선생님 사용자 정보를 찾을 수 없습니다.")
+    normalized_email = (payload.email or "").strip() or None
+    user.email = normalized_email
+    db.commit()
+    return {"ok": True, "teacher_id": teacher_id, "email": user.email}
+
+
+def _send_settlement_email(to_email: str, *, teacher_name: str, billing_month: str, net_amount: int) -> None:
+    host = (os.getenv("SMTP_HOST") or "").strip()
+    port = int(os.getenv("SMTP_PORT") or "587")
+    username = (os.getenv("SMTP_USER") or "").strip()
+    password = os.getenv("SMTP_PASS") or ""
+    from_email = (os.getenv("SMTP_FROM") or username).strip()
+    use_tls = (os.getenv("SMTP_USE_TLS") or "true").strip().lower() in {"1", "true", "yes", "y"}
+
+    if not host or not from_email:
+        raise HTTPException(
+            status_code=400,
+            detail="SMTP 설정이 필요합니다. SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS/SMTP_FROM 환경변수를 설정하세요.",
+        )
+
+    subject = f"[보다수학] {billing_month} 정산 내역 안내 ({teacher_name})"
+    body = (
+        f"{teacher_name} 선생님,\n\n"
+        f"{billing_month} 정산 내역을 안내드립니다.\n"
+        f"- 최종 정산금액: {format_currency(net_amount)}\n\n"
+        "상세 내역은 정산 이미지를 확인해 주세요.\n"
+        "감사합니다."
+    )
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = from_email
+    message["To"] = to_email
+    message.set_content(body)
+
+    with smtplib.SMTP(host, port, timeout=20) as smtp:
+        if use_tls:
+            smtp.starttls()
+        if username:
+            smtp.login(username, password)
+        smtp.send_message(message)
+
+
+def format_currency(value: int) -> str:
+    try:
+        return f"₩{int(value):,}"
+    except Exception:
+        return f"₩{value}"
+
+
+@app.post("/api/teachers/settlements/send-email")
+def send_teacher_settlement_emails(payload: SettlementEmailSendPayload, db: Session = Depends(get_db)):
+    billing_month = str(payload.billing_month or "").strip()
+    if not billing_month:
+        raise HTTPException(status_code=400, detail="billing_month는 필수입니다.")
+    selected_teacher_ids = {int(tid) for tid in (payload.teacher_ids or []) if tid is not None}
+    rows = (
+        db.query(
+            Settlement.teacher_id,
+            func.coalesce(func.sum(Settlement.net_amount), 0).label("net_amount"),
+        )
+        .filter(Settlement.billing_month == billing_month)
+        .group_by(Settlement.teacher_id)
+        .all()
+    )
+    sent = []
+    skipped = []
+    failed = []
+    for teacher_id, net_amount in rows:
+        if selected_teacher_ids and int(teacher_id) not in selected_teacher_ids:
+            continue
+        teacher = db.query(TeacherProfile).filter(TeacherProfile.id == teacher_id).first()
+        teacher_name = _teacher_name_by_profile_id(db, int(teacher_id))
+        email = None
+        if teacher:
+            email = db.query(User.email).filter(User.id == teacher.user_id).scalar()
+        email = (email or "").strip()
+        if not email:
+            skipped.append({"teacher_id": int(teacher_id), "teacher_name": teacher_name, "reason": "email 없음"})
+            continue
+        try:
+            _send_settlement_email(email, teacher_name=teacher_name, billing_month=billing_month, net_amount=_safe_int(net_amount))
+            sent.append({"teacher_id": int(teacher_id), "teacher_name": teacher_name, "email": email})
+        except Exception as exc:
+            failed.append(
+                {
+                    "teacher_id": int(teacher_id),
+                    "teacher_name": teacher_name,
+                    "email": email,
+                    "reason": str(exc),
+                }
+            )
 
     return {
-        "teacher_id": teacher_id,
-        "teacher_name": teacher_name,
+        "ok": len(failed) == 0,
         "billing_month": billing_month,
-        "settlement_summary": settlement_summary,
-        "lesson_records": lesson_items,
-        "refund_requests": refund_items,
+        "selected_count": len(selected_teacher_ids) if selected_teacher_ids else len(rows),
+        "sent_count": len(sent),
+        "skipped_count": len(skipped),
+        "failed_count": len(failed),
+        "sent": sent,
+        "skipped": skipped,
+        "failed": failed,
+    }
+
+
+@app.patch("/api/students/payment-status")
+def update_student_payment_status(payload: PaymentStatusPayload, db: Session = Depends(get_db)):
+    normalized = str(payload.payment_status or "").strip().lower()
+    if normalized not in {"paid", "unpaid"}:
+        raise HTTPException(status_code=400, detail="payment_status는 paid 또는 unpaid 이어야 합니다.")
+    q = db.query(MonthlyPaymentRecord).filter(
+        MonthlyPaymentRecord.billing_month == payload.billing_month,
+        MonthlyPaymentRecord.student_id == payload.student_id,
+    )
+    if payload.teacher_id is not None:
+        q = q.filter(MonthlyPaymentRecord.teacher_id == payload.teacher_id)
+    rows = q.all()
+    if not rows:
+        raise HTTPException(status_code=404, detail="수납 레코드를 찾을 수 없습니다.")
+    for row in rows:
+        row.payment_status = normalized
+    db.commit()
+    return {
+        "ok": True,
+        "updated_count": len(rows),
+        "billing_month": payload.billing_month,
+        "student_id": payload.student_id,
+        "teacher_id": payload.teacher_id,
+        "payment_status": normalized,
     }
 
 
@@ -917,6 +1550,136 @@ def _parse_date_only(value: Optional[str]) -> Optional[date]:
         return date.fromisoformat(text)
     except ValueError:
         return None
+
+
+COMMISSION_EXCLUDED_TEACHERS = {"신태준", "서재현", "윤성민"}
+
+
+def _expected_commission_rate_by_tenure(start: date, billing_month: str) -> float:
+    target_month = _parse_date_only(f"{billing_month}-01")
+    if not target_month:
+        return 60.0
+    elapsed_months = (target_month.year - start.year) * 12 + (target_month.month - start.month)
+    # 개월차 기준: 7개월차부터 65%, 13개월차부터 70%
+    # (elapsed_months는 0부터 시작하므로 7개월차=6, 13개월차=12)
+    if elapsed_months >= 12:
+        return 70.0
+    if elapsed_months >= 6:
+        return 65.0
+    return 60.0
+
+
+def _auto_adjust_commission_rates_for_month(db: Session, billing_month: str) -> dict[str, Any]:
+    rows = (
+        db.query(
+            MonthlyPaymentRecord,
+            LessonEnrollment,
+            User.name,
+            User.id,
+        )
+        .join(LessonEnrollment, LessonEnrollment.id == MonthlyPaymentRecord.enrollment_id)
+        .join(TeacherProfile, TeacherProfile.id == LessonEnrollment.teacher_id)
+        .join(User, User.id == TeacherProfile.user_id)
+        .filter(MonthlyPaymentRecord.billing_month == billing_month)
+        .all()
+    )
+    changed_by_teacher: dict[int, dict[str, Any]] = {}
+    notice_by_teacher: dict[int, dict[str, Any]] = {}
+    changed_record_ids: set[int] = set()
+    changed_enrollment_ids: set[int] = set()
+    touched_teacher_ids: set[int] = set()
+
+    for payment, enrollment, teacher_name, teacher_user_id in rows:
+        teacher_name = str(teacher_name or "").strip()
+        if teacher_name in COMMISSION_EXCLUDED_TEACHERS:
+            continue
+        start = _parse_date_only(enrollment.start_date)
+        if not start:
+            continue
+        expected = _expected_commission_rate_by_tenure(start, billing_month)
+        current_rate = float(payment.commission_rate or 60.0)
+        elapsed_months = (_parse_date_only(f"{billing_month}-01").year - start.year) * 12 + (
+            _parse_date_only(f"{billing_month}-01").month - start.month
+        )
+        is_notice_month = elapsed_months in (6, 12)
+        if is_notice_month:
+            notice_entry = notice_by_teacher.setdefault(
+                int(payment.teacher_id),
+                {
+                    "teacher_id": int(payment.teacher_id),
+                    "teacher_name": teacher_name,
+                    "students": [],
+                },
+            )
+            notice_entry["students"].append(
+                {
+                    "student_id": int(payment.student_id),
+                    "student_name": _student_name_by_profile_id(db, int(payment.student_id)),
+                    "enrollment_id": int(enrollment.id),
+                    "current_rate": current_rate,
+                    "target_rate": expected,
+                    "start_date": enrollment.start_date,
+                }
+            )
+        if abs(current_rate - expected) < 1e-6:
+            continue
+
+        payment.commission_rate = expected
+        touched_teacher_ids.add(int(payment.teacher_id))
+        changed_record_ids.add(int(payment.id))
+        changed_enrollment_ids.add(int(enrollment.id))
+
+        entry = changed_by_teacher.setdefault(
+            int(payment.teacher_id),
+            {
+                "teacher_id": int(payment.teacher_id),
+                "teacher_name": teacher_name,
+                "students": [],
+            },
+        )
+        entry["students"].append(
+            {
+                "student_id": int(payment.student_id),
+                "student_name": _student_name_by_profile_id(db, int(payment.student_id)),
+                "enrollment_id": int(enrollment.id),
+                "old_rate": current_rate,
+                "new_rate": expected,
+                "start_date": enrollment.start_date,
+            }
+        )
+
+    # enrollment 현재 수수료율도 최신값으로 맞춘다.
+    if changed_enrollment_ids:
+        enrollment_rows = (
+            db.query(LessonEnrollment)
+            .filter(LessonEnrollment.id.in_(list(changed_enrollment_ids)))
+            .all()
+        )
+        for enrollment in enrollment_rows:
+            start = _parse_date_only(enrollment.start_date)
+            if not start:
+                continue
+            expected = _expected_commission_rate_by_tenure(start, billing_month)
+            enrollment.current_commission_rate = expected
+
+    # 변경된 선생님-월 정산을 재동기화
+    for teacher_id in touched_teacher_ids:
+        sync_settlements_from_payments(db, billing_month=billing_month, teacher_id=teacher_id)
+
+    if touched_teacher_ids:
+        db.flush()
+
+    changed_teachers = sorted(changed_by_teacher.values(), key=lambda x: x["teacher_name"])
+    changed_count = sum(len(t["students"]) for t in changed_teachers)
+    notice_teachers = sorted(notice_by_teacher.values(), key=lambda x: x["teacher_name"])
+    notice_count = sum(len(t["students"]) for t in notice_teachers)
+    return {
+        "billing_month": billing_month,
+        "changed_count": changed_count,
+        "changed_teachers": changed_teachers,
+        "notice_count": notice_count,
+        "notice_teachers": notice_teachers,
+    }
 
 
 def _enrollment_valid_for_month(enrollment: LessonEnrollment, month: str) -> bool:
@@ -976,6 +1739,7 @@ def list_students_by_month(db: Session, month: Optional[str] = None) -> dict[str
             MonthlyPaymentRecord.enrollment_id.label("enrollment_id"),
             MonthlyPaymentRecord.final_amount.label("final_amount"),
             MonthlyPaymentRecord.billing_unit.label("billing_unit"),
+            MonthlyPaymentRecord.payment_status.label("payment_status"),
             LessonEnrollment.teacher_id.label("teacher_id"),
             LessonEnrollment.payment_method.label("payment_method"),
             Product.name.label("product_name"),
@@ -1019,6 +1783,7 @@ def list_students_by_month(db: Session, month: Optional[str] = None) -> dict[str
                 "teachers": [],
                 "billing_units": [],
                 "payment_methods": [],
+                "payment_statuses": [],
             }
             agg[key] = entry
 
@@ -1038,6 +1803,9 @@ def list_students_by_month(db: Session, month: Optional[str] = None) -> dict[str
             entry["billing_units"].append(row.billing_unit)
         if row.payment_method and row.payment_method not in entry["payment_methods"]:
             entry["payment_methods"].append(row.payment_method)
+        payment_status = str(row.payment_status or "paid").lower()
+        if payment_status not in entry["payment_statuses"]:
+            entry["payment_statuses"].append(payment_status)
 
     items = sorted(
         agg.values(),
@@ -1068,6 +1836,11 @@ def list_students_by_month(db: Session, month: Optional[str] = None) -> dict[str
         idx = name_indices.get(base_name, 0) + 1
         name_indices[base_name] = idx
         item["student_display_name"] = f"{base_name} ({idx})"
+        item["payment_status"] = "unpaid" if "unpaid" in item.get("payment_statuses", []) else "paid"
+
+    for item in items:
+        if "payment_status" not in item:
+            item["payment_status"] = "unpaid" if "unpaid" in item.get("payment_statuses", []) else "paid"
 
     return {"billing_month": month, "items": items}
 

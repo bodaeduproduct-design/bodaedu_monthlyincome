@@ -258,11 +258,23 @@ def apply_pricing_to_payment_row(
     )
 
     row.billing_unit = quote.billing_unit
-    row.base_amount = quote.base_amount
-    row.total_sessions = quote.total_sessions
+    row.total_sessions = int(quote.total_sessions or 0)
+    if quote.billing_unit == "per_session":
+        # 회당 수업은 "총 횟수"와 "완료 횟수"를 분리해 관리하고, 지급은 완료 횟수 기준으로 계산합니다.
+        unit_price = int(round(quote.base_amount / row.total_sessions)) if row.total_sessions > 0 else 0
+        completed = int(row.completed_sessions or 0)
+        if completed <= 0 and row.total_sessions > 0:
+            completed = row.total_sessions
+        completed = max(0, min(completed, row.total_sessions)) if row.total_sessions > 0 else 0
+        row.completed_sessions = completed
+        row.base_amount = unit_price * row.total_sessions
+        priced_amount = unit_price * completed
+    else:
+        row.base_amount = quote.base_amount
+        priced_amount = quote.base_amount
     special = int(row.special_amount or 0)
     refund = int(row.refund_amount or 0)
-    row.final_amount = max(0, quote.base_amount + special - refund)
+    row.final_amount = max(0, priced_amount + special - refund)
     if row.final_amount <= 0 and quote.payment_tag != "first_month":
         row.payment_tag = "unpaid"
     else:

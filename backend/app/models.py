@@ -39,6 +39,7 @@ class TeacherProfile(Base):
     education = Column(String, nullable=True)
     major = Column(String, nullable=True)
     status = Column(String, nullable=True, default="active")
+    status_changed_at = Column(String, nullable=True)
     created_at = Column(String, nullable=True)
 
 
@@ -109,6 +110,7 @@ class MonthlyPaymentRecord(Base):
     refund_amount = Column(Integer, nullable=True, default=0)
     final_amount = Column(Integer, nullable=True, default=0)
     commission_rate = Column(Float, nullable=True)
+    payment_status = Column(String, nullable=True, default="paid")
     payment_tag = Column(String, nullable=True)
     memo = Column(Text, nullable=True)
 
