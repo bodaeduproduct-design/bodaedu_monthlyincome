@@ -1,0 +1,319 @@
+/**
+ * Wanted DS 기반 공통 컴포넌트 스타일 (정산앱)
+ * 기존 클래스명 유지 — App.css 위에 토큰만 덮어씀
+ */
+
+/* Shell & header */
+.app-shell {
+  background: var(--app-color-bg);
+}
+
+.app-header {
+  background: rgba(255, 255, 255, 0.96);
+  border-bottom-color: var(--wanted-line-solid);
+}
+
+.brand-mark {
+  border-radius: var(--wanted-radius-sm);
+  background: var(--app-color-primary);
+}
+
+.brand-text span {
+  color: var(--app-color-text-assistive);
+  font-size: var(--wanted-text-caption-size);
+}
+
+.gnb-item {
+  color: var(--app-color-text-muted);
+  font-size: var(--wanted-text-label-size);
+  font-weight: var(--wanted-text-label-weight);
+}
+
+.gnb-item:hover {
+  color: var(--app-color-text-strong);
+}
+
+.gnb-item.active {
+  border-bottom-color: var(--app-color-primary);
+  color: var(--app-color-primary);
+}
+
+.gnb-item--db.active {
+  background: var(--app-color-primary-surface);
+}
+
+.header-sync span {
+  color: var(--app-color-text-assistive);
+}
+
+.header-sync strong {
+  color: var(--wanted-label-neutral);
+  font-size: var(--wanted-text-caption-size);
+}
+
+/* Page layout */
+.page-panel {
+  border-color: var(--wanted-line-solid);
+  border-radius: var(--wanted-radius-md);
+  background: var(--app-color-surface);
+}
+
+.page-panel__header {
+  border-bottom-color: var(--wanted-line-solid);
+}
+
+.page-heading .eyebrow,
+.page-heading__desc {
+  color: var(--app-color-text-muted);
+}
+
+.page-heading__meta {
+  color: var(--app-color-text-assistive);
+}
+
+/* DB subnav */
+.db-subnav {
+  gap: var(--wanted-space-2);
+  padding: var(--wanted-space-1);
+  border-radius: var(--wanted-radius-md);
+  background: var(--wanted-fill-normal);
+  border-color: var(--wanted-line-solid);
+}
+
+.db-subnav__item:hover {
+  border-color: var(--wanted-line-solid);
+}
+
+.db-subnav__item.active {
+  border-color: var(--wanted-blue-200);
+  box-shadow: var(--wanted-shadow-sm);
+}
+
+.db-subnav__label {
+  color: var(--app-color-text-strong);
+}
+
+.db-subnav__item.active .db-subnav__label {
+  color: var(--app-color-primary-strong);
+}
+
+.db-subnav__desc {
+  color: var(--app-color-text-muted);
+}
+
+/* Buttons — Wanted Action / Solid */
+.primary-button {
+  min-height: 44px;
+  padding: 0 var(--wanted-space-4);
+  border-radius: var(--wanted-radius-md);
+  border-color: var(--app-color-primary);
+  background: var(--app-color-primary);
+  color: #ffffff;
+  font-size: var(--wanted-text-body-2-size);
+  font-weight: 600;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.primary-button:hover:not(:disabled) {
+  border-color: var(--app-color-primary-hover);
+  background: var(--app-color-primary-hover);
+}
+
+.secondary-button {
+  min-height: 44px;
+  padding: 0 var(--wanted-space-4);
+  border-radius: var(--wanted-radius-md);
+  border-color: var(--wanted-line-solid);
+  background: var(--app-color-surface);
+  color: var(--wanted-label-neutral);
+  font-size: var(--wanted-text-body-2-size);
+  font-weight: 600;
+}
+
+.secondary-button:hover:not(:disabled) {
+  background: var(--wanted-fill-alternative);
+}
+
+.ghost-button {
+  border-color: var(--wanted-line-solid);
+  background: var(--wanted-fill-alternative);
+  color: var(--wanted-label-neutral);
+  border-radius: var(--wanted-radius-md);
+}
+
+.danger-button {
+  border-color: rgba(240, 68, 82, 0.3);
+  background: var(--wanted-status-negative-surface);
+  color: var(--wanted-status-negative);
+  border-radius: var(--wanted-radius-md);
+}
+
+.link-button {
+  color: var(--app-color-primary);
+  font-weight: 600;
+}
+
+.link-button:hover {
+  color: var(--app-color-primary-hover);
+}
+
+/* Inputs */
+.toolbar-field,
+.toolbar-field select,
+.toolbar-field input,
+.data-admin__toolbar input,
+.data-admin__editor input,
+.data-admin__editor textarea,
+.data-admin__editor select {
+  border-color: var(--wanted-line-solid);
+  border-radius: var(--wanted-radius-sm);
+  color: var(--app-color-text);
+}
+
+.toolbar-field select:focus,
+.toolbar-field input:focus,
+.data-admin__toolbar input:focus,
+.data-admin__editor input:focus,
+.data-admin__editor textarea:focus,
+.data-admin__editor select:focus {
+  border-color: var(--app-color-primary);
+  box-shadow: 0 0 0 3px rgba(49, 130, 246, 0.2);
+}
+
+/* Cards & stats */
+.section-card {
+  padding: var(--wanted-space-5) var(--wanted-space-6);
+  background: var(--app-color-surface);
+  border-color: var(--wanted-line-solid);
+  border-radius: var(--wanted-radius-md);
+  box-shadow: var(--wanted-shadow-sm);
+}
+
+.section-card__header h3 {
+  font-size: var(--wanted-text-body-1-size);
+  font-weight: 700;
+  color: var(--app-color-text-strong);
+}
+
+.section-card__header h2 {
+  font-size: var(--wanted-text-title-3-size);
+  font-weight: var(--wanted-text-title-3-weight);
+  line-height: var(--wanted-text-title-3-line);
+}
+
+.stat-card {
+  background: var(--wanted-bg-alternative);
+  border-color: var(--wanted-line-solid);
+  border-radius: var(--wanted-radius-lg);
+}
+
+.stat-card strong {
+  color: var(--app-color-text-strong);
+}
+
+.stat-value--primary {
+  color: var(--app-color-primary) !important;
+}
+
+.stat-card--clickable:hover {
+  border-color: var(--wanted-blue-200);
+  background: var(--app-color-primary-surface);
+}
+
+.stat-card--active {
+  border-color: var(--app-color-primary);
+  background: var(--app-color-primary-surface);
+}
+
+.stat-card__caption {
+  color: var(--app-color-text-assistive);
+}
+
+.stat-delta--up {
+  color: var(--wanted-status-negative);
+}
+
+.stat-delta--down {
+  color: var(--app-color-primary);
+}
+
+/* Banner — Feedback */
+.banner {
+  border-radius: var(--wanted-radius-md);
+  font-size: var(--wanted-text-body-2-size);
+}
+
+.banner.success {
+  background: var(--wanted-status-positive-surface);
+  border: 1px solid rgba(0, 196, 113, 0.35);
+  color: #008a52;
+}
+
+.banner.error {
+  background: var(--wanted-status-negative-surface);
+  border: 1px solid rgba(240, 68, 82, 0.35);
+  color: #d02533;
+}
+
+/* Tables */
+.settlement-overview-table th {
+  background: var(--wanted-fill-alternative);
+  color: var(--app-color-text-muted);
+  font-size: var(--wanted-text-caption-size);
+  font-weight: 600;
+}
+
+.settlement-overview-table td {
+  border-bottom-color: var(--wanted-line-solid);
+  color: var(--app-color-text);
+  font-size: var(--wanted-text-body-2-size);
+}
+
+.settlement-overview-table tfoot td {
+  background: var(--wanted-fill-normal);
+}
+
+.settlement-overview-table tbody tr:hover {
+  background: var(--wanted-fill-alternative);
+}
+
+/* Modal */
+.modal-backdrop {
+  background: rgba(23, 23, 25, 0.45);
+}
+
+.modal-panel {
+  border-radius: var(--wanted-radius-lg);
+  box-shadow: var(--wanted-shadow-modal);
+}
+
+/* Data admin sidebar */
+.data-admin__sidebar {
+  border-color: var(--wanted-line-solid);
+  background: var(--app-color-surface);
+}
+
+.data-admin__table-btn {
+  border-radius: var(--wanted-radius-sm);
+}
+
+.data-admin__table-btn.active {
+  background: var(--app-color-primary-surface);
+  border-color: var(--wanted-blue-200);
+}
+
+.data-admin__table-btn strong {
+  color: var(--app-color-text-strong);
+}
+
+.data-admin__table-btn code {
+  color: var(--app-color-text-assistive);
+}
+
+/* Empty state */
+.empty-state {
+  color: var(--app-color-text-muted);
+  font-size: var(--wanted-text-body-2-size);
+}

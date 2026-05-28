@@ -1,8 +1,9 @@
 """수업(lesson_enrollments) → 월별 수납(monthly_payment_records) 자동 생성/갱신.
 
 목표:
-- 본수업(start_date)이 있고, 종료/해지가 없는 수업은 시작월부터 매월 레코드를 유지
-- 수납이 없는 달은 final_amount=0 (미납/예정)
+- 진행 중 수업: 시작월 ~ 익월(다음 달)까지 매월 레코드 유지 (미리 매출 파악)
+- 종료/해지 수업: 시작월 ~ 종료(해지)월까지만 유지, 그 이후 월 레코드는 삭제
+- 금액: products + 수업(price_type, 요일) 기준 자동 산출 (payment_pricing)
 """
 
 from __future__ import annotations
@@ -14,8 +15,9 @@ from typing import Iterable, Optional
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
-from .enrollment_billing import parse_date_only
+from .enrollment_billing import enrollment_covers_billing_month, parse_date_only
 from .models import LessonEnrollment, MonthlyPaymentRecord, Product
+from .payment_pricing import apply_pricing_to_payment_row
 
 
 @dataclass(frozen=True)
@@ -30,6 +32,29 @@ class MonthKey:
 
 def _month_key(d: date) -> MonthKey:
     return MonthKey(d.year, d.month)
+
+
+def _compare_month_keys(a: MonthKey, b: MonthKey) -> int:
+    if (a.year, a.month) < (b.year, b.month):
+        return -1
+    if (a.year, a.month) > (b.year, b.month):
+        return 1
+    return 0
+
+
+def _min_month_key(a: MonthKey, b: MonthKey) -> MonthKey:
+    return a if _compare_month_keys(a, b) <= 0 else b
+
+
+def _add_months(mk: MonthKey, months: int) -> MonthKey:
+    y, m = mk.year, mk.month + months
+    while m > 12:
+        m -= 12
+        y += 1
+    while m < 1:
+        m += 12
+        y -= 1
+    return MonthKey(y, m)
 
 
 def _month_iter(start: MonthKey, end: MonthKey) -> Iterable[MonthKey]:
@@ -58,18 +83,147 @@ def _commission_rate_for_enrollment(enrollment: LessonEnrollment) -> float:
         return 60.0
 
 
+def _last_billing_month_key(enrollment: LessonEnrollment, *, as_of: date) -> Optional[MonthKey]:
+    """수납 레코드를 만들 마지막 청구월. 진행 중이면 as_of 월 + 익월."""
+    start = parse_date_only(enrollment.start_date)
+    if not start:
+        return None
+
+    cap = _month_key(as_of)
+    end = parse_date_only(enrollment.end_date)
+    cancelled = parse_date_only(enrollment.cancelled_at)
+
+    if end:
+        cap = _min_month_key(cap, _month_key(end))
+    if cancelled:
+        cap = _min_month_key(cap, _month_key(cancelled))
+
+    if not end and not cancelled:
+        cap = _add_months(_month_key(as_of), 1)
+
+    return cap
+
+
+def _get_or_create_monthly_row(
+    db: Session,
+    enrollment: LessonEnrollment,
+    mk: MonthKey,
+    *,
+    unit: str,
+    rate: float,
+) -> tuple[MonthlyPaymentRecord, bool]:
+    """행 조회/생성. (row, created)"""
+    existing = (
+        db.query(MonthlyPaymentRecord)
+        .filter(
+            MonthlyPaymentRecord.enrollment_id == enrollment.id,
+            MonthlyPaymentRecord.billing_month == mk.text,
+        )
+        .first()
+    )
+    if existing:
+        before = (existing.student_id, existing.teacher_id, existing.billing_unit, existing.commission_rate)
+        existing.student_id = enrollment.student_id
+        existing.teacher_id = enrollment.teacher_id
+        if not existing.billing_unit:
+            existing.billing_unit = unit
+        if existing.commission_rate is None:
+            existing.commission_rate = rate
+        after = (existing.student_id, existing.teacher_id, existing.billing_unit, existing.commission_rate)
+        return existing, before != after
+
+    row = MonthlyPaymentRecord(
+        billing_month=mk.text,
+        enrollment_id=enrollment.id,
+        student_id=enrollment.student_id,
+        teacher_id=enrollment.teacher_id,
+        billing_unit=unit,
+        total_sessions=0,
+        completed_sessions=0,
+        base_amount=0,
+        special_amount=0,
+        refund_amount=0,
+        final_amount=0,
+        commission_rate=rate,
+        payment_tag="unpaid",
+        memo=None,
+    )
+    db.add(row)
+    db.flush()
+    return row, True
+
+
+def prune_payment_records_outside_enrollment(db: Session, enrollment: LessonEnrollment) -> int:
+    """종료일·해지일 이후(또는 수업 기간 밖) 월별 수납 행 삭제."""
+    rows = (
+        db.query(MonthlyPaymentRecord)
+        .filter(MonthlyPaymentRecord.enrollment_id == enrollment.id)
+        .all()
+    )
+    removed = 0
+    for row in rows:
+        if not enrollment_covers_billing_month(enrollment, row.billing_month):
+            db.delete(row)
+            removed += 1
+    if removed:
+        db.flush()
+    return removed
+
+
+def sync_payment_records_for_enrollment(
+    db: Session,
+    enrollment: LessonEnrollment,
+    *,
+    as_of: Optional[date] = None,
+    product: Optional[Product] = None,
+) -> int:
+    """단일 수업의 유효 청구월 범위에 맞춰 월별 수납 레코드·금액을 맞춥니다."""
+    as_of = as_of or date.today()
+    start = parse_date_only(enrollment.start_date)
+    if not start:
+        return prune_payment_records_outside_enrollment(db, enrollment)
+
+    if product is None and enrollment.product_id:
+        product = db.get(Product, enrollment.product_id)
+
+    last_key = _last_billing_month_key(enrollment, as_of=as_of)
+    if not last_key:
+        return prune_payment_records_outside_enrollment(db, enrollment)
+
+    start_key = _month_key(start)
+    if _compare_month_keys(start_key, last_key) > 0:
+        return prune_payment_records_outside_enrollment(db, enrollment)
+
+    unit = _billing_unit_for_enrollment(db, enrollment)
+    rate = _commission_rate_for_enrollment(enrollment)
+    changed = 0
+
+    for mk in _month_iter(start_key, last_key):
+        if not enrollment_covers_billing_month(enrollment, mk.text):
+            continue
+        row, row_changed = _get_or_create_monthly_row(db, enrollment, mk, unit=unit, rate=rate)
+        if row_changed:
+            changed += 1
+        if apply_pricing_to_payment_row(db, row, enrollment, product):
+            changed += 1
+
+    changed += prune_payment_records_outside_enrollment(db, enrollment)
+    db.flush()
+    return changed
+
+
 def sync_monthly_payment_records_from_enrollments(
     db: Session,
     *,
     as_of: Optional[date] = None,
 ) -> int:
     """
-    수업이 '계속 진행 중'인 경우(종료/해지 없음), start_date 월부터 as_of 월까지
-    매월 monthly_payment_records를 보장합니다.
+    모든 수업에 대해 월별 수납 레코드를 보장합니다.
+    - 진행 중: 시작월 ~ 익월
+    - 종료/해지: 시작월 ~ 종료(해지)월, 이후 월은 삭제
+    - 금액: 상품·가격유형·요일 기준 자동 계산
     """
     as_of = as_of or date.today()
-    end_key = _month_key(as_of)
-
     changed = 0
     rows = (
         db.query(LessonEnrollment)
@@ -77,65 +231,18 @@ def sync_monthly_payment_records_from_enrollments(
         .all()
     )
 
+    product_cache: dict[int, Product] = {}
     for enrollment in rows:
-        # 해지/종료 수업은 자동 생성 대상에서 제외 (과거 레코드는 남겨둠)
-        if enrollment.cancelled_at and str(enrollment.cancelled_at).strip():
-            continue
-        if enrollment.end_date and str(enrollment.end_date).strip():
-            continue
+        product = None
+        if enrollment.product_id:
+            pid = int(enrollment.product_id)
+            product = product_cache.get(pid)
+            if product is None:
+                product = db.get(Product, pid)
+                if product:
+                    product_cache[pid] = product
+        changed += sync_payment_records_for_enrollment(
+            db, enrollment, as_of=as_of, product=product
+        )
 
-        start = parse_date_only(enrollment.start_date)
-        if not start:
-            continue
-
-        start_key = _month_key(start)
-        unit = _billing_unit_for_enrollment(db, enrollment)
-        rate = _commission_rate_for_enrollment(enrollment)
-
-        for mk in _month_iter(start_key, end_key):
-            existing = (
-                db.query(MonthlyPaymentRecord)
-                .filter(
-                    MonthlyPaymentRecord.enrollment_id == enrollment.id,
-                    MonthlyPaymentRecord.billing_month == mk.text,
-                )
-                .first()
-            )
-            if not existing:
-                db.add(
-                    MonthlyPaymentRecord(
-                        billing_month=mk.text,
-                        enrollment_id=enrollment.id,
-                        student_id=enrollment.student_id,
-                        teacher_id=enrollment.teacher_id,
-                        billing_unit=unit,
-                        total_sessions=0,
-                        completed_sessions=0,
-                        base_amount=0,
-                        special_amount=0,
-                        refund_amount=0,
-                        final_amount=0,
-                        commission_rate=rate,
-                        trial_fee=0,
-                        payment_tag="unpaid",
-                        memo=None,
-                    )
-                )
-                changed += 1
-                continue
-
-            # 기존 레코드는 금액을 건드리지 않고, 관계/메타만 최신화
-            before = (existing.student_id, existing.teacher_id, existing.billing_unit, existing.commission_rate)
-            existing.student_id = enrollment.student_id
-            existing.teacher_id = enrollment.teacher_id
-            if not existing.billing_unit:
-                existing.billing_unit = unit
-            if existing.commission_rate is None:
-                existing.commission_rate = rate
-            after = (existing.student_id, existing.teacher_id, existing.billing_unit, existing.commission_rate)
-            if before != after:
-                changed += 1
-
-    db.flush()
     return changed
-

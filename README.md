@@ -12,6 +12,14 @@
 - `정산앱/boda.db`: 실제 실행 시 조회/수정되는 SQLite DB
 - `정산앱/boda_db_sqlite.sql`: DB 스키마/샘플 데이터를 담은 SQL 문서(참조용)
 
+## 디자인 시스템
+
+UI는 [Wanted Design System (Community)](https://www.figma.com/design/h8tAkZDjuv9o4yvxPS7MkQ/Wanted-Design-System--Community-) 토큰을 기준으로 합니다.
+
+- 토큰: `frontend/src/tokens/wanted.css` (색·타이포·간격·radius)
+- 컴포넌트 스타일: `frontend/src/tokens/wanted-components.css` (버튼·카드·테이블·모달 등)
+- 폰트: Pretendard (CDN)
+
 ## 주요 기능
 
 - 대시보드: 총매출, 월별결제/회당결제, 순수익(지급액), 시범수업비, 결제수단 분포, 매출 추이

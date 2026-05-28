@@ -132,3 +132,35 @@ def sync_settlements_from_payments(
     db.flush()
     return changed
 
+
+def prune_settlements_without_payments(
+    db: Session,
+    *,
+    billing_months: Optional[list[str]] = None,
+    teacher_ids: Optional[list[int]] = None,
+) -> int:
+    """월별 수납이 없어진 (teacher, month, unit) 조합의 정산 행 제거."""
+    q = db.query(Settlement)
+    if billing_months:
+        q = q.filter(Settlement.billing_month.in_(billing_months))
+    if teacher_ids:
+        q = q.filter(Settlement.teacher_id.in_(teacher_ids))
+
+    removed = 0
+    for settlement in q.all():
+        payment_count = (
+            db.query(MonthlyPaymentRecord)
+            .filter(
+                MonthlyPaymentRecord.teacher_id == settlement.teacher_id,
+                MonthlyPaymentRecord.billing_month == settlement.billing_month,
+                MonthlyPaymentRecord.billing_unit == settlement.settlement_type,
+            )
+            .count()
+        )
+        if payment_count == 0:
+            db.delete(settlement)
+            removed += 1
+    if removed:
+        db.flush()
+    return removed
+

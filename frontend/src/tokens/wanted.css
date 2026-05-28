@@ -1,0 +1,127 @@
+/**
+ * Wanted Design System (Community) — design tokens
+ * Source: https://www.figma.com/design/h8tAkZDjuv9o4yvxPS7MkQ/Wanted-Design-System--Community-
+ * Extracted via Figma MCP (Semantic Color, Typography, Spacing foundations)
+ */
+
+:root {
+  /* Atomic — Blue (brand primary) */
+  --wanted-blue-50: #e8f3ff;
+  --wanted-blue-100: #c9e2ff;
+  --wanted-blue-200: #90c2ff;
+  --wanted-blue-300: #64a8ff;
+  --wanted-blue-400: #4593fc;
+  --wanted-blue-500: #3182f6;
+  --wanted-blue-600: #2272eb;
+  --wanted-blue-700: #1b64da;
+  --wanted-blue-800: #1957c2;
+  --wanted-blue-900: #194aa6;
+
+  /* Atomic — Neutral */
+  --wanted-neutral-50: #f7f7f8;
+  --wanted-neutral-100: #f0f0f1;
+  --wanted-neutral-200: #e5e5e7;
+  --wanted-neutral-300: #d9d9dc;
+  --wanted-neutral-400: #c2c4c8;
+  --wanted-neutral-500: #aeb0b6;
+  --wanted-neutral-600: #989ba2;
+  --wanted-neutral-700: #878a93;
+  --wanted-neutral-800: #70737c;
+  --wanted-neutral-900: #5a5c63;
+  --wanted-neutral-950: #37383c;
+
+  /* Semantic — Label */
+  --wanted-label-strong: #000000;
+  --wanted-label-normal: #171719;
+  --wanted-label-neutral: rgba(46, 47, 51, 0.88);
+  --wanted-label-alternative: rgba(55, 56, 60, 0.61);
+  --wanted-label-assistive: rgba(55, 56, 60, 0.28);
+  --wanted-label-disable: rgba(55, 56, 60, 0.16);
+
+  /* Semantic — Background */
+  --wanted-bg-normal: #ffffff;
+  --wanted-bg-alternative: #f7f7f8;
+  --wanted-bg-elevated: #ffffff;
+
+  /* Semantic — Line */
+  --wanted-line-normal: rgba(112, 115, 124, 0.22);
+  --wanted-line-neutral: rgba(112, 115, 124, 0.16);
+  --wanted-line-solid: #e5e5e7;
+
+  /* Semantic — Fill */
+  --wanted-fill-normal: rgba(112, 115, 124, 0.08);
+  --wanted-fill-alternative: rgba(112, 115, 124, 0.05);
+  --wanted-fill-strong: rgba(112, 115, 124, 0.16);
+
+  /* Semantic — Primary / Status */
+  --wanted-primary: var(--wanted-blue-500);
+  --wanted-primary-strong: var(--wanted-blue-600);
+  --wanted-status-positive: #00c471;
+  --wanted-status-negative: #f04452;
+  --wanted-status-cautionary: #ffb800;
+
+  /* Semantic — Status surfaces */
+  --wanted-status-positive-surface: #e8faf2;
+  --wanted-status-negative-surface: #ffeeee;
+  --wanted-status-cautionary-surface: #fff8e6;
+
+  /* Typography — Pretendard (Wanted DS) */
+  --wanted-font-family:
+    'Pretendard', 'Pretendard JP', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --wanted-text-title-1-size: 36px;
+  --wanted-text-title-1-weight: 700;
+  --wanted-text-title-1-line: 1.334;
+  --wanted-text-title-3-size: 24px;
+  --wanted-text-title-3-weight: 700;
+  --wanted-text-title-3-line: 1.334;
+  --wanted-text-body-1-size: 16px;
+  --wanted-text-body-1-weight: 500;
+  --wanted-text-body-1-line: 1.5;
+  --wanted-text-body-2-size: 14px;
+  --wanted-text-body-2-weight: 500;
+  --wanted-text-body-2-line: 1.5;
+  --wanted-text-caption-size: 12px;
+  --wanted-text-caption-weight: 500;
+  --wanted-text-caption-line: 1.4;
+  --wanted-text-label-size: 13px;
+  --wanted-text-label-weight: 600;
+
+  /* Spacing (4px base) */
+  --wanted-space-1: 4px;
+  --wanted-space-2: 8px;
+  --wanted-space-3: 12px;
+  --wanted-space-4: 16px;
+  --wanted-space-5: 20px;
+  --wanted-space-6: 24px;
+  --wanted-space-8: 32px;
+  --wanted-space-10: 40px;
+  --wanted-space-12: 48px;
+  --wanted-space-16: 64px;
+
+  /* Radius */
+  --wanted-radius-sm: 8px;
+  --wanted-radius-md: 12px;
+  --wanted-radius-lg: 16px;
+  --wanted-radius-xl: 24px;
+  --wanted-radius-full: 999px;
+
+  /* Elevation */
+  --wanted-shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.06);
+  --wanted-shadow-md: 0 8px 24px rgba(0, 0, 0, 0.08);
+  --wanted-shadow-lg: 0 24px 60px rgba(0, 0, 0, 0.12);
+  --wanted-shadow-modal: 0 24px 60px rgba(23, 23, 25, 0.18);
+
+  /* App aliases (정산앱에서 사용) */
+  --app-color-text: var(--wanted-label-normal);
+  --app-color-text-strong: var(--wanted-label-strong);
+  --app-color-text-muted: var(--wanted-label-alternative);
+  --app-color-text-assistive: var(--wanted-label-assistive);
+  --app-color-bg: var(--wanted-bg-alternative);
+  --app-color-surface: var(--wanted-bg-normal);
+  --app-color-border: var(--wanted-line-normal);
+  --app-color-border-solid: var(--wanted-line-solid);
+  --app-color-primary: var(--wanted-primary);
+  --app-color-primary-hover: var(--wanted-primary-strong);
+  --app-color-primary-surface: var(--wanted-blue-50);
+  --app-font: var(--wanted-font-family);
+}

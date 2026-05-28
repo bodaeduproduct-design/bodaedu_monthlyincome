@@ -1089,14 +1089,14 @@ tbody tr:hover td {
 }
 
 .modal-panel {
-  width: min(960px, 100%);
+  width: min(1120px, 100%);
   background: #fff;
   border-radius: 16px;
   box-shadow: 0 24px 60px rgba(15, 23, 42, 0.18);
 }
 
 .settlement-modal {
-  padding: 24px;
+  padding: 20px 22px 24px;
 }
 
 .settlement-modal__header {
@@ -1151,6 +1151,104 @@ tbody tr:hover td {
   margin: 0 0 12px;
   color: #64748b;
   font-size: 13px;
+}
+
+.student-detail-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.student-detail-kpis {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.student-detail-kpi {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #f8fafc;
+  padding: 12px 14px;
+}
+
+.student-detail-kpi span {
+  display: block;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.student-detail-kpi strong {
+  display: block;
+  margin-top: 5px;
+  font-size: 18px;
+  color: #0f172a;
+  font-weight: 800;
+}
+
+.student-detail-block {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #ffffff;
+  padding: 12px;
+}
+
+.student-detail-block__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.student-detail-block__header h4 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.student-detail-block__header span {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.student-detail-month {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tag-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.tag-chip--first-month {
+  color: #1d4ed8;
+  border: 1px solid #bfdbfe;
+  background: #eff6ff;
+}
+
+/* 학생 수납 상세 팝업: 가로 스크롤 없이 폭 맞춤 */
+.student-detail-modal .table-wrap {
+  overflow-x: hidden;
+}
+
+.student-detail-modal .settlement-overview-table {
+  min-width: 0;
+  width: 100%;
+  table-layout: fixed;
+}
+
+.student-detail-modal .settlement-overview-table thead th,
+.student-detail-modal .settlement-overview-table tbody td,
+.student-detail-modal .settlement-overview-table tfoot td {
+  white-space: normal;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
 }
 
 .enrollment-grid {
@@ -1509,6 +1607,7 @@ tbody tr:hover td {
   .profile-grid,
   .student-summary-grid,
   .editor-grid,
+  .student-detail-kpis,
   .settlement-modal__summary,
   .enrollment-card dl {
     grid-template-columns: 1fr;
@@ -2317,12 +2416,36 @@ tbody tr:hover td {
   align-items: center;
 }
 
-.data-admin__toolbar input {
+.data-admin__toolbar input[type='text'],
+.data-admin__toolbar input:not([type]) {
   min-width: 160px;
   padding: 8px 10px;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
   font: inherit;
+}
+
+.data-admin__filter-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #ffffff;
+  font-size: 13px;
+  font-weight: 600;
+  color: #334155;
+  cursor: pointer;
+  user-select: none;
+}
+
+.data-admin__filter-check input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  cursor: pointer;
 }
 
 .data-admin__body {
@@ -3044,6 +3167,11 @@ tbody tr:hover td {
   font-weight: 600;
   color: #0f172a;
   white-space: nowrap;
+}
+
+.students-amount--pending {
+  color: #878a93;
+  font-weight: 600;
 }
 
 .students-layout > .section-card:first-child {

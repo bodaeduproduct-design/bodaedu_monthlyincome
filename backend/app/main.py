@@ -140,14 +140,6 @@ def _sum_enrollment_trial_fee(db: Session, billing_month: str) -> int:
     )
 
 
-def _sum_lesson_trial_fee(db: Session, billing_month: str) -> int:
-    return _safe_int(
-        db.query(func.coalesce(func.sum(MonthlyPaymentRecord.trial_fee), 0))
-        .filter(MonthlyPaymentRecord.billing_month == billing_month)
-        .scalar()
-    )
-
-
 def _sum_trial_fee_for_month(db: Session, billing_month: str) -> int:
     """해당 월 시범수업비 — 구독(선생님 지급 기준) 우선, 없으면 settlements."""
     from_sub = _sum_enrollment_trial_fee(db, billing_month)
@@ -468,11 +460,10 @@ def app_data(db: Session = Depends(get_db)):
 
     if lesson_exists > 0:
         lesson_by_month = {
-            row[0]: {"gross_amount": _safe_int(row[1]), "trial_fee": _safe_int(row[2])}
+            row[0]: {"gross_amount": _safe_int(row[1]), "trial_fee": 0}
             for row in db.query(
                 MonthlyPaymentRecord.billing_month,
                 func.coalesce(func.sum(MonthlyPaymentRecord.final_amount), 0),
-                func.coalesce(func.sum(MonthlyPaymentRecord.trial_fee), 0),
             )
             .group_by(MonthlyPaymentRecord.billing_month)
             .all()
@@ -900,7 +891,7 @@ def list_students(month: Optional[str] = None, db: Session = Depends(get_db)):
     학생 수납/관리용 학생 목록.
     - 학생(이름/연락) + 연결된 구독(상품/결제수단/담당선생님) 요약을 제공합니다.
     """
-    # 조회월 기준: 해당 월에 "수납(금액>0)"이 있는 학생만 리스트업
+    # 조회월 기준: 해당 월에 월별 수납 레코드가 있는 학생 (금액 0 포함)
     # month 미지정이면 기존처럼 전체 학생 반환(레거시)
     return list_students_by_month(db, month=month)
 
@@ -994,7 +985,6 @@ def list_students_by_month(db: Session, month: Optional[str] = None) -> dict[str
         .outerjoin(LessonEnrollment, LessonEnrollment.id == MonthlyPaymentRecord.enrollment_id)
         .outerjoin(Product, Product.id == LessonEnrollment.product_id)
         .filter(MonthlyPaymentRecord.billing_month == month)
-        .filter(MonthlyPaymentRecord.final_amount > 0)
         .order_by(User.name.asc(), MonthlyPaymentRecord.id.asc())
         .all()
     )
@@ -1009,23 +999,35 @@ def list_students_by_month(db: Session, month: Optional[str] = None) -> dict[str
         if tid and name
     }
 
-    agg: dict[int, dict[str, Any]] = {}
+    agg: dict[tuple[int, Optional[int]], dict[str, Any]] = {}
     for row in payment_rows:
         sid = int(row.student_id)
-        entry = agg.get(sid)
+        tid = int(row.teacher_id) if row.teacher_id is not None else None
+        key = (sid, tid)
+        entry = agg.get(key)
         if not entry:
             entry = {
+                "student_row_key": f"{sid}:{tid if tid is not None else 'na'}",
                 "student_id": sid,
                 "student_name": row.student_name,
+                "student_display_name": row.student_name,
+                "teacher_id": tid,
                 "month_paid_amount": 0,
+                "month_paid_amount_monthly": 0,
+                "month_paid_amount_per_session": 0,
                 "products": [],
                 "teachers": [],
                 "billing_units": [],
                 "payment_methods": [],
             }
-            agg[sid] = entry
+            agg[key] = entry
 
-        entry["month_paid_amount"] += _safe_int(row.final_amount)
+        amount = _safe_int(row.final_amount)
+        entry["month_paid_amount"] += amount
+        if row.billing_unit == "monthly":
+            entry["month_paid_amount_monthly"] += amount
+        elif row.billing_unit == "per_session":
+            entry["month_paid_amount_per_session"] += amount
 
         if row.product_name and row.product_name not in entry["products"]:
             entry["products"].append(row.product_name)
@@ -1037,7 +1039,36 @@ def list_students_by_month(db: Session, month: Optional[str] = None) -> dict[str
         if row.payment_method and row.payment_method not in entry["payment_methods"]:
             entry["payment_methods"].append(row.payment_method)
 
-    items = sorted(agg.values(), key=lambda x: (x.get("student_name") or ""))
+    items = sorted(
+        agg.values(),
+        key=lambda x: (
+            x.get("student_name") or "",
+            x.get("teachers", [""])[0] if x.get("teachers") else "",
+            x.get("student_id") or 0,
+            x.get("teacher_id") if x.get("teacher_id") is not None else -1,
+        ),
+    )
+
+    # 동명이인(또는 동일 학생명 다중 행) 표시 보조: 이름 (1), 이름 (2)
+    name_counts: dict[str, int] = {}
+    for item in items:
+        base_name = str(item.get("student_name") or "").strip()
+        if not base_name:
+            continue
+        name_counts[base_name] = name_counts.get(base_name, 0) + 1
+
+    name_indices: dict[str, int] = {}
+    for item in items:
+        base_name = str(item.get("student_name") or "").strip()
+        if not base_name:
+            continue
+        if name_counts.get(base_name, 0) <= 1:
+            item["student_display_name"] = base_name
+            continue
+        idx = name_indices.get(base_name, 0) + 1
+        name_indices[base_name] = idx
+        item["student_display_name"] = f"{base_name} ({idx})"
+
     return {"billing_month": month, "items": items}
 
 
@@ -1055,6 +1086,7 @@ def student_detail(student_id: int, month: Optional[str] = None, db: Session = D
     if not student_row:
         return {"detail": "학생을 찾을 수 없습니다."}
     student, student_name = student_row
+    weekday_labels = {1: "월", 2: "화", 3: "수", 4: "목", 5: "금", 6: "토", 7: "일"}
 
     subs = (
         db.query(LessonEnrollment, Product.name, User.name)
@@ -1084,6 +1116,14 @@ def student_detail(student_id: int, month: Optional[str] = None, db: Session = D
             "first_month_sessions": sub.first_month_sessions,
             "first_month_ratio": sub.first_month_ratio,
             "first_month_amount": sub.first_month_amount,
+            "day_1": sub.day_1,
+            "day_2": sub.day_2,
+            "day_3": sub.day_3,
+            "weekdays": [
+                weekday_labels[d]
+                for d in [sub.day_1, sub.day_2, sub.day_3]
+                if d in weekday_labels
+            ],
         }
         if month:
             item["is_valid_for_month"] = _enrollment_valid_for_month(sub, month)
@@ -1115,6 +1155,17 @@ def student_detail(student_id: int, month: Optional[str] = None, db: Session = D
         if enrollment_ids
         else {}
     )
+    product_name_by_enrollment = (
+        {
+            eid: pname
+            for eid, pname in db.query(LessonEnrollment.id, Product.name)
+            .outerjoin(Product, Product.id == LessonEnrollment.product_id)
+            .filter(LessonEnrollment.id.in_(enrollment_ids))
+            .all()
+        }
+        if enrollment_ids
+        else {}
+    )
 
     month_payment_items = [
         {
@@ -1124,12 +1175,7 @@ def student_detail(student_id: int, month: Optional[str] = None, db: Session = D
             "enrollment_id": row.enrollment_id,
             "billing_unit": row.billing_unit,
             "teacher_name": _teacher_name_by_profile_id(db, row.teacher_id),
-            "product_name": (
-                db.query(Product.name)
-                .join(LessonEnrollment, LessonEnrollment.product_id == Product.id)
-                .filter(LessonEnrollment.id == row.enrollment_id)
-                .scalar()
-            ),
+            "product_name": product_name_by_enrollment.get(row.enrollment_id),
             "payment_method": payment_method_by_enrollment.get(row.enrollment_id),
             "total_sessions": row.total_sessions,
             "completed_sessions": row.completed_sessions,
@@ -1137,7 +1183,6 @@ def student_detail(student_id: int, month: Optional[str] = None, db: Session = D
             "special_amount": row.special_amount,
             "refund_amount": row.refund_amount,
             "final_amount": row.final_amount,
-            "trial_fee": row.trial_fee,
             "payment_tag": row.payment_tag,
             "memo": row.memo,
         }
@@ -1151,6 +1196,7 @@ def student_detail(student_id: int, month: Optional[str] = None, db: Session = D
             "teacher_id": row.teacher_id,
             "enrollment_id": row.enrollment_id,
             "billing_unit": row.billing_unit,
+            "product_name": product_name_by_enrollment.get(row.enrollment_id),
             "payment_method": payment_method_by_enrollment.get(row.enrollment_id),
             "final_amount": row.final_amount,
             "payment_tag": row.payment_tag,
@@ -1244,6 +1290,7 @@ def admin_list_table_rows(
     offset: int = 0,
     limit: int = 50,
     q: Optional[str] = None,
+    exclude_ended: bool = False,
     db: Session = Depends(get_db),
 ):
     if table_name not in list_table_names():
@@ -1251,7 +1298,14 @@ def admin_list_table_rows(
     limit = min(max(limit, 1), 200)
     offset = max(offset, 0)
     try:
-        return list_rows(db, table_name, offset=offset, limit=limit, query=q)
+        return list_rows(
+            db,
+            table_name,
+            offset=offset,
+            limit=limit,
+            query=q,
+            exclude_ended=exclude_ended,
+        )
     except KeyError:
         raise HTTPException(status_code=404, detail="알 수 없는 테이블입니다.") from None
 

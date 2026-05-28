@@ -54,15 +54,10 @@ def resolve_enrollment_trial_fee(enrollment: LessonEnrollment, *, persist: bool 
 
 def clear_trial_from_payment_records(db: Session, enrollment_id: Optional[int] = None) -> int:
     """
-    monthly_payment_records는 학생 수납 전용 — 시범비 컬럼 비우기.
+    monthly_payment_records는 학생 수납 전용.
     시범만 위해 만들어진 수납 행(payment_tag=trial, 수납 0)은 제거.
     """
     from sqlalchemy import delete, update
-
-    upd = update(MonthlyPaymentRecord).where(MonthlyPaymentRecord.trial_fee != 0).values(trial_fee=0)
-    if enrollment_id is not None:
-        upd = upd.where(MonthlyPaymentRecord.enrollment_id == enrollment_id)
-    updated = db.execute(upd).rowcount or 0
 
     rem = delete(MonthlyPaymentRecord).where(
         MonthlyPaymentRecord.payment_tag == "trial",
@@ -85,7 +80,7 @@ def clear_trial_from_payment_records(db: Session, enrollment_id: Optional[int] =
     tagged = db.execute(fix_tag).rowcount or 0
 
     db.expire_all()
-    return int(updated) + int(deleted) + int(tagged)
+    return int(deleted) + int(tagged)
 
 
 def _settlement_type_for_product(product: Optional[Product]) -> str:

@@ -11,6 +11,38 @@ from sqlalchemy.orm import Session
 from .models import LessonEnrollment
 
 
+def billing_month_bounds(billing_month: str) -> tuple[date, date]:
+    """'YYYY-MM' → (해당 월 1일, 해당 월 말일)."""
+    year_s, month_s = str(billing_month).split("-")
+    y, m = int(year_s), int(month_s)
+    start_m = date(y, m, 1)
+    if m == 12:
+        end_m = date(y, 12, 31)
+    else:
+        end_m = date(y, m + 1, 1)
+        end_m = date.fromordinal(end_m.toordinal() - 1)
+    return start_m, end_m
+
+
+def enrollment_covers_billing_month(enrollment: LessonEnrollment, billing_month: str) -> bool:
+    """수업 기간이 해당 청구월과 겹치는지 (종료일·해지일 이후 월은 False)."""
+    start_m, end_m = billing_month_bounds(billing_month)
+    start = parse_date_only(enrollment.start_date)
+    if not start:
+        return False
+
+    end = parse_date_only(enrollment.end_date)
+    cancelled = parse_date_only(enrollment.cancelled_at)
+
+    if cancelled and cancelled < start_m:
+        return False
+    if end and end < start_m:
+        return False
+    if start > end_m:
+        return False
+    return True
+
+
 def parse_date_only(value: Optional[str]) -> Optional[date]:
     if value is None or value == "":
         return None

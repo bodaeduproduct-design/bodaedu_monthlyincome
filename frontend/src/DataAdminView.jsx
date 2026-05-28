@@ -86,15 +86,19 @@ function FieldInput({ column, value, onChange }) {
   return <input type="text" {...common} />
 }
 
+const DEFAULT_TABLE = 'users'
+const ENROLLMENT_TABLE = 'lesson_enrollments'
+
 export default function DataAdminView({ onDataChanged, initialTable }) {
   const [schemas, setSchemas] = useState([])
-  const [selectedTable, setSelectedTable] = useState(initialTable ?? 'student_records')
+  const [selectedTable, setSelectedTable] = useState(initialTable ?? DEFAULT_TABLE)
   const [rows, setRows] = useState([])
   const [total, setTotal] = useState(0)
   const [offset, setOffset] = useState(0)
   const [limit] = useState(50)
   const [query, setQuery] = useState('')
   const [searchInput, setSearchInput] = useState('')
+  const [excludeEndedLessons, setExcludeEndedLessons] = useState(true)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -126,6 +130,9 @@ export default function DataAdminView({ onDataChanged, initialTable }) {
       if (query.trim()) {
         params.set('q', query.trim())
       }
+      if (selectedTable === ENROLLMENT_TABLE && excludeEndedLessons) {
+        params.set('exclude_ended', 'true')
+      }
       const data = await apiRequest(`/api/admin/tables/${selectedTable}/rows?${params}`)
       setRows(data.rows ?? [])
       setTotal(data.total ?? 0)
@@ -134,11 +141,25 @@ export default function DataAdminView({ onDataChanged, initialTable }) {
     } finally {
       setLoading(false)
     }
-  }, [selectedTable, offset, limit, query])
+  }, [selectedTable, offset, limit, query, excludeEndedLessons])
 
   useEffect(() => {
     loadSchemas().catch((loadError) => setError(loadError.message))
   }, [loadSchemas])
+
+  useEffect(() => {
+    if (!schemas.length) {
+      return
+    }
+    const exists = schemas.some((schema) => schema.table === selectedTable)
+    if (exists) {
+      return
+    }
+    const fallback = schemas.some((schema) => schema.table === DEFAULT_TABLE)
+      ? DEFAULT_TABLE
+      : schemas[0].table
+    setSelectedTable(fallback)
+  }, [schemas, selectedTable])
 
   useEffect(() => {
     loadRows()
@@ -146,7 +167,7 @@ export default function DataAdminView({ onDataChanged, initialTable }) {
 
   useEffect(() => {
     setOffset(0)
-  }, [selectedTable, query])
+  }, [selectedTable, query, excludeEndedLessons])
 
   const openCreate = () => {
     if (!tableSchema) {
@@ -275,6 +296,16 @@ export default function DataAdminView({ onDataChanged, initialTable }) {
               </p>
             </div>
             <div className="data-admin__toolbar">
+              {selectedTable === ENROLLMENT_TABLE ? (
+                <label className="data-admin__filter-check">
+                  <input
+                    type="checkbox"
+                    checked={excludeEndedLessons}
+                    onChange={(event) => setExcludeEndedLessons(event.target.checked)}
+                  />
+                  <span>종료된 수업 제외</span>
+                </label>
+              ) : null}
               <input
                 value={searchInput}
                 onChange={(event) => setSearchInput(event.target.value)}

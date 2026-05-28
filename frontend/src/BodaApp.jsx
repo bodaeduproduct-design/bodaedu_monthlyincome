@@ -5,6 +5,7 @@ import DataOverviewView from './DataOverviewView.jsx'
 import DataRegisterView from './DataRegisterView.jsx'
 import DbSchemaView from './DbSchemaView.jsx'
 import './App.css'
+import './tokens/wanted-components.css'
 
 const MAIN_NAV_ITEMS = [
   { id: 'dashboard', label: '대시보드' },
@@ -40,6 +41,12 @@ function settlementTypeLabel(settlementType) {
   if (settlementType === 'per_session') return '회당'
   if (settlementType === 'trial') return '시범'
   return '월별'
+}
+
+function paymentTagLabel(paymentTag) {
+  if (paymentTag === 'first_month') return '첫달 수업'
+  if (paymentTag === 'regular') return '정규수업'
+  return paymentTag || '-'
 }
 
 function formatMonth(value) {
@@ -498,9 +505,11 @@ export default function BodaApp() {
   const [students, setStudents] = useState([])
   const [studentsLoading, setStudentsLoading] = useState(false)
   const [studentsError, setStudentsError] = useState('')
+  const [studentBillingFilter, setStudentBillingFilter] = useState('all')
   const [selectedStudentId, setSelectedStudentId] = useState(null)
   const [studentDetail, setStudentDetail] = useState(null)
   const [studentDetailLoading, setStudentDetailLoading] = useState(false)
+  const [studentDetailError, setStudentDetailError] = useState('')
 
   useEffect(() => {
     if (selectedPage !== 'students' || !selectedMonth) return
@@ -530,16 +539,38 @@ export default function BodaApp() {
     if (selectedPage !== 'students') return
     setSelectedStudentId(null)
     setStudentDetail(null)
+    setStudentDetailError('')
+    setStudentBillingFilter('all')
   }, [selectedPage, selectedMonth])
+
+  const filteredStudents = useMemo(() => {
+    if (studentBillingFilter === 'all') return students
+    if (studentBillingFilter === 'monthly') {
+      return students.filter(
+        (student) =>
+          (student.billing_units ?? []).includes('monthly') || (student.month_paid_amount_monthly ?? 0) > 0,
+      )
+    }
+    return students.filter(
+      (student) =>
+        (student.billing_units ?? []).includes('per_session') || (student.month_paid_amount_per_session ?? 0) > 0,
+    )
+  }, [students, studentBillingFilter])
 
   useEffect(() => {
     if (selectedPage !== 'students' || selectedStudentId === null || !selectedMonth) return
     let cancelled = false
     const load = async () => {
       setStudentDetailLoading(true)
+      setStudentDetailError('')
       try {
         const res = await apiRequest(`/api/students/${selectedStudentId}?month=${encodeURIComponent(selectedMonth)}`)
         if (!cancelled) setStudentDetail(res)
+      } catch (e) {
+        if (!cancelled) {
+          setStudentDetail(null)
+          setStudentDetailError(e.message || '학생 상세를 불러오지 못했습니다.')
+        }
       } finally {
         if (!cancelled) setStudentDetailLoading(false)
       }
@@ -549,6 +580,27 @@ export default function BodaApp() {
       cancelled = true
     }
   }, [selectedPage, selectedStudentId, selectedMonth])
+
+  const studentDetailSummary = useMemo(() => {
+    const payments = studentDetail?.month_payments ?? []
+    const enrollments = studentDetail?.enrollments ?? []
+    const totalPaymentAmount = payments.reduce((sum, row) => sum + (Number(row.final_amount) || 0), 0)
+    const totalSessions = payments.reduce((sum, row) => sum + (Number(row.total_sessions) || 0), 0)
+    const completedSessions = payments.reduce((sum, row) => sum + (Number(row.completed_sessions) || 0), 0)
+    const weekdaySet = new Set()
+    enrollments.forEach((enrollment) => {
+      ;(enrollment.weekdays ?? []).forEach((day) => {
+        if (day) weekdaySet.add(day)
+      })
+    })
+    const weekdayText = Array.from(weekdaySet).join(', ')
+    return {
+      totalPaymentAmount,
+      totalSessions,
+      completedSessions,
+      weekdayText: weekdayText || '-',
+    }
+  }, [studentDetail])
 
   const paymentDonutData = useMemo(
     () =>
@@ -561,11 +613,39 @@ export default function BodaApp() {
 
   const renderStudents = () => (
     <div className="students-layout">
-      <SectionCard title="학생 수납" description="선택 월에 수납(금액>0)이 있는 학생만 표시합니다.">
+      <SectionCard
+        title="학생 수납"
+        description="선택 월에 월별 수납 레코드가 있는 학생을 표시합니다. 금액 0원은 예정·미납입니다."
+        actions={
+          <div className="filter-chips">
+            <button
+              type="button"
+              className={studentBillingFilter === 'all' ? 'chip active' : 'chip'}
+              onClick={() => setStudentBillingFilter('all')}
+            >
+              전체
+            </button>
+            <button
+              type="button"
+              className={studentBillingFilter === 'monthly' ? 'chip active' : 'chip'}
+              onClick={() => setStudentBillingFilter('monthly')}
+            >
+              월별
+            </button>
+            <button
+              type="button"
+              className={studentBillingFilter === 'per_session' ? 'chip active' : 'chip'}
+              onClick={() => setStudentBillingFilter('per_session')}
+            >
+              회당
+            </button>
+          </div>
+        }
+      >
         {studentsError ? <div className="banner error">{studentsError}</div> : null}
         {studentsLoading ? <div className="empty-state compact">불러오는 중...</div> : null}
-        {students.length === 0 && !studentsLoading ? (
-          <div className="empty-state compact">선택한 월에 수납된 학생이 없습니다.</div>
+        {filteredStudents.length === 0 && !studentsLoading ? (
+          <div className="empty-state compact">선택한 조건에 맞는 학생 수납 내역이 없습니다.</div>
         ) : (
           <div className="table-wrap settlement-overview-wrap">
             <table className="settlement-overview-table">
@@ -581,10 +661,10 @@ export default function BodaApp() {
                 </tr>
               </thead>
               <tbody>
-                {students.map((student) => (
-                  <tr key={student.student_id}>
+                {filteredStudents.map((student) => (
+                  <tr key={student.student_row_key ?? `${student.student_id}:${student.teacher_id ?? 'na'}`}>
                     <td>
-                      <strong>{student.student_name}</strong>
+                      <strong>{student.student_display_name ?? student.student_name}</strong>
                     </td>
                     <td>{(student.products ?? []).join(', ') || '-'}</td>
                     <td>{(student.teachers ?? []).join(', ') || '-'}</td>
@@ -593,7 +673,31 @@ export default function BodaApp() {
                       {(student.payment_methods ?? []).map((m) => formatPaymentMethodLabel(m)).join(', ') || '-'}
                     </td>
                     <td>
-                      <strong>{formatCurrency(student.month_paid_amount)}</strong>
+                      <strong
+                        className={
+                          (studentBillingFilter === 'monthly'
+                            ? student.month_paid_amount_monthly
+                            : studentBillingFilter === 'per_session'
+                              ? student.month_paid_amount_per_session
+                              : student.month_paid_amount) > 0
+                            ? ''
+                            : 'students-amount--pending'
+                        }
+                      >
+                        {(studentBillingFilter === 'monthly'
+                          ? student.month_paid_amount_monthly
+                          : studentBillingFilter === 'per_session'
+                            ? student.month_paid_amount_per_session
+                            : student.month_paid_amount) > 0
+                          ? formatCurrency(
+                              studentBillingFilter === 'monthly'
+                                ? student.month_paid_amount_monthly
+                                : studentBillingFilter === 'per_session'
+                                  ? student.month_paid_amount_per_session
+                                  : student.month_paid_amount,
+                            )
+                          : '예정 (0원)'}
+                      </strong>
                     </td>
                     <td>
                       <button
@@ -622,67 +726,110 @@ export default function BodaApp() {
           onClose={() => {
             setSelectedStudentId(null)
             setStudentDetail(null)
+            setStudentDetailError('')
           }}
         >
           {studentDetailLoading ? <div className="empty-state compact">불러오는 중...</div> : null}
+          {studentDetailError ? <div className="banner error">{studentDetailError}</div> : null}
           {studentDetail ? (
-            <>
-              <SectionCard title="이번달 수납 내역">
-                <div className="table-wrap">
-                  <table className="settlement-overview-table">
-                    <thead>
-                      <tr>
-                        <th>선생님</th>
-                        <th>상품</th>
-                        <th>결제기준</th>
-                        <th>결제수단</th>
-                        <th>금액</th>
-                        <th>태그</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(studentDetail.month_payments ?? []).map((row) => (
-                        <tr key={row.id}>
-                          <td>{row.teacher_name ?? `선생님#${row.teacher_id}`}</td>
-                          <td>{row.product_name ?? '-'}</td>
-                          <td>{row.billing_unit ? settlementTypeLabel(row.billing_unit) : '-'}</td>
-                          <td>{row.payment_method ? formatPaymentMethodLabel(row.payment_method) : '-'}</td>
-                          <td>
-                            <strong>{formatCurrency(row.final_amount)}</strong>
-                          </td>
-                          <td>{row.payment_tag ?? '-'}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </SectionCard>
+            <div className="student-detail-modal">
+              <div className="student-detail-kpis">
+                <article className="student-detail-kpi">
+                  <span>총 결제 금액</span>
+                  <strong>{formatCurrency(studentDetailSummary.totalPaymentAmount)}</strong>
+                </article>
+                <article className="student-detail-kpi">
+                  <span>이번달 총 수업 횟수</span>
+                  <strong>{studentDetailSummary.totalSessions}회</strong>
+                </article>
+                <article className="student-detail-kpi">
+                  <span>수업 요일</span>
+                  <strong>{studentDetailSummary.weekdayText}</strong>
+                </article>
+                <article className="student-detail-kpi">
+                  <span>총 진행 수업 횟수</span>
+                  <strong>{studentDetailSummary.completedSessions}회</strong>
+                </article>
+              </div>
 
-              <SectionCard title="이전 내역" description="최근 30건">
-                <div className="table-wrap">
-                  <table className="settlement-overview-table">
-                    <thead>
-                      <tr>
-                        <th>월</th>
-                        <th>결제기준</th>
-                        <th>금액</th>
-                        <th>태그</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(studentDetail.payment_history ?? []).slice(0, 30).map((row) => (
-                        <tr key={row.id}>
-                          <td>{row.billing_month}</td>
-                          <td>{row.billing_unit ? settlementTypeLabel(row.billing_unit) : '-'}</td>
-                          <td>{formatCurrency(row.final_amount)}</td>
-                          <td>{row.payment_tag ?? '-'}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+              <section className="student-detail-block">
+                <div className="student-detail-block__header">
+                  <h4>이번달 수납 내역</h4>
                 </div>
-              </SectionCard>
-            </>
+                {(studentDetail.month_payments ?? []).length === 0 ? (
+                  <div className="empty-state compact">이번달 수납 내역이 없습니다.</div>
+                ) : (
+                  <div className="table-wrap">
+                    <table className="settlement-overview-table">
+                      <thead>
+                        <tr>
+                          <th>선생님</th>
+                          <th>상품</th>
+                          <th>결제기준</th>
+                          <th>결제수단</th>
+                          <th>금액</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(studentDetail.month_payments ?? []).map((row) => (
+                          <tr key={row.id}>
+                            <td>{row.teacher_name ?? `선생님#${row.teacher_id}`}</td>
+                            <td>{row.product_name ?? '-'}</td>
+                            <td>{row.billing_unit ? settlementTypeLabel(row.billing_unit) : '-'}</td>
+                            <td>{row.payment_method ? formatPaymentMethodLabel(row.payment_method) : '-'}</td>
+                            <td>
+                              <strong>{formatCurrency(row.final_amount)}</strong>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
+
+              <section className="student-detail-block">
+                <div className="student-detail-block__header">
+                  <h4>이전 내역</h4>
+                  <span>최근 30건</span>
+                </div>
+                {(studentDetail.payment_history ?? []).length === 0 ? (
+                  <div className="empty-state compact">이전 수납 내역이 없습니다.</div>
+                ) : (
+                  <div className="table-wrap">
+                    <table className="settlement-overview-table">
+                      <thead>
+                        <tr>
+                          <th>월</th>
+                          <th>상품</th>
+                          <th>결제기준</th>
+                          <th>결제수단</th>
+                          <th>금액</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(studentDetail.payment_history ?? []).slice(0, 30).map((row) => (
+                          <tr key={row.id}>
+                            <td>
+                              <span className="student-detail-month">
+                                {row.billing_month}
+                                {row.payment_tag === 'first_month' ? (
+                                  <span className="tag-chip tag-chip--first-month">{paymentTagLabel(row.payment_tag)}</span>
+                                ) : null}
+                              </span>
+                            </td>
+                            <td>{row.product_name ?? '-'}</td>
+                            <td>{row.billing_unit ? settlementTypeLabel(row.billing_unit) : '-'}</td>
+                            <td>{row.payment_method ? formatPaymentMethodLabel(row.payment_method) : '-'}</td>
+                            <td>{formatCurrency(row.final_amount)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
+            </div>
           ) : null}
         </DetailModal>
       ) : null}
@@ -832,7 +979,13 @@ export default function BodaApp() {
           key={item.id}
           type="button"
           className={item.id === selectedPage ? 'db-subnav__item active' : 'db-subnav__item'}
-          onClick={() => setSelectedPage(item.id)}
+          onClick={() => {
+            if (item.id === 'data-admin') {
+              setDataAdminTable(null)
+            }
+            setSelectedPage(item.id)
+            setLastDbPage(item.id)
+          }}
         >
           <span className="db-subnav__label">{item.label}</span>
           <span className="db-subnav__desc">{item.description}</span>

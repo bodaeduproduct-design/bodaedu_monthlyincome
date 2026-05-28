@@ -1,17 +1,17 @@
-/** 차트 — 단색·플랫 스타일 (그라데이션 없음) */
-const BAR_COLOR = '#2563eb'
-const GRID = '#e2e8f0'
-const AXIS = '#94a3b8'
-const LABEL = '#64748b'
+/** 차트 — Wanted DS 토큰 기준 단색 (그라데이션 없음) */
+const BAR_COLOR = '#3182f6'
+const GRID = '#e5e5e7'
+const AXIS = '#aeb0b6'
+const LABEL = '#878a93'
 
-const DONUT_COLORS = ['#2563eb', '#64748b', '#94a3b8', '#cbd5e1', '#e2e8f0', '#f1f5f9']
+const DONUT_COLORS = ['#3182f6', '#70737c', '#aeb0b6', '#d9d9dc', '#e5e5e7', '#f0f0f1']
 
 export function formatPaymentMethodLabel(method) {
   const map = {
-    card: '카드',
+    card: '카드(효성)',
     transfer: '계좌이체',
-    payer: '대리결제',
-    cms: 'CMS',
+    payer: '납부자(효성)',
+    cms: 'CMS(효성)',
   }
   return map[method] || method || '미입력'
 }

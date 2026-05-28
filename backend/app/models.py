@@ -109,7 +109,6 @@ class MonthlyPaymentRecord(Base):
     refund_amount = Column(Integer, nullable=True, default=0)
     final_amount = Column(Integer, nullable=True, default=0)
     commission_rate = Column(Float, nullable=True)
-    trial_fee = Column(Integer, nullable=True, default=0)
     payment_tag = Column(String, nullable=True)
     memo = Column(Text, nullable=True)
 

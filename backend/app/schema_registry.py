@@ -94,7 +94,11 @@ TABLE_REGISTRY: dict[str, dict[str, Any]] = {
             "student_id": {"label": "학생ID", "type": "fk", "fk_table": "student_profiles", "required": True},
             "teacher_id": {"label": "선생님ID", "type": "fk", "fk_table": "teacher_profiles", "required": True},
             "product_id": {"label": "상품ID", "type": "fk", "fk_table": "products"},
-            "price_type": {"label": "가격유형", "type": "text"},
+            "price_type": {
+                "label": "가격유형",
+                "type": "text",
+                "help": "price_17 / price_35(월별) · per_session(회당). 상품 단가표와 함께 수납 금액 자동 계산",
+            },
             "payment_method": {"label": "결제수단", "type": "text"},
             "day_1": {"label": "요일1", "type": "integer"},
             "day_2": {"label": "요일2", "type": "integer"},
@@ -130,6 +134,7 @@ TABLE_REGISTRY: dict[str, dict[str, Any]] = {
         "layer": "ledger",
         "sheet": "boda.db",
         "search_fields": ["billing_month", "billing_unit", "payment_tag"],
+        "search_hint": "수납월·학생명·선생님명·결제기준·태그",
         "allow_create": True,
         "allow_delete": True,
         "columns": {
@@ -146,11 +151,6 @@ TABLE_REGISTRY: dict[str, dict[str, Any]] = {
             "refund_amount": {"label": "환불", "type": "integer"},
             "final_amount": {"label": "최종금액", "type": "integer"},
             "commission_rate": {"label": "수수료율", "type": "float"},
-            "trial_fee": {
-                "label": "시범비(미사용)",
-                "type": "integer",
-                "editable": False,
-            },
             "payment_tag": {"label": "결제태그", "type": "text"},
             "memo": {"label": "메모", "type": "textarea"},
         },
