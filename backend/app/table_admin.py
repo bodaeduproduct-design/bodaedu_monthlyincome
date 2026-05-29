@@ -24,6 +24,7 @@ from .billing_sync import normalize_enrollment_trial, sync_enrollment_trial_sett
 from .enrollment_billing import normalize_enrollment_dates, sync_enrollment_next_billing
 from .lookup_labels import build_admin_lookups, enrich_row
 from .payment_record_sync import sync_payment_records_for_enrollment
+from .payment_pricing import recompute_payment_final_amount
 from .settlement_sync import prune_settlements_without_payments, sync_settlements_from_payments
 from .schema_registry import get_table_schema, list_table_names, resolve_table_name
 
@@ -280,6 +281,13 @@ def create_row(db: Session, table_name: str, values: dict[str, Any]) -> dict[str
             sync_payment_records_for_enrollment(db, row, product=product)
             sync_settlements_from_payments(db)
             prune_settlements_without_payments(db, teacher_ids=[row.teacher_id])
+        elif resolve_table_name(table_name) == "monthly_payment_records":
+            recompute_payment_final_amount(row)
+            sync_settlements_from_payments(
+                db,
+                billing_month=row.billing_month,
+                teacher_id=row.teacher_id,
+            )
         db.commit()
     except IntegrityError as exc:
         db.rollback()
@@ -305,6 +313,13 @@ def update_row(db: Session, table_name: str, row_id: int, values: dict[str, Any]
             sync_payment_records_for_enrollment(db, row, product=product)
             sync_settlements_from_payments(db)
             prune_settlements_without_payments(db, teacher_ids=[row.teacher_id])
+        elif resolve_table_name(table_name) == "monthly_payment_records":
+            recompute_payment_final_amount(row)
+            sync_settlements_from_payments(
+                db,
+                billing_month=row.billing_month,
+                teacher_id=row.teacher_id,
+            )
         db.commit()
     except IntegrityError as exc:
         db.rollback()

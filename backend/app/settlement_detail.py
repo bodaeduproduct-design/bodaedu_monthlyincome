@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 from sqlalchemy.orm import Session
 
 from .models import LessonEnrollment, MonthlyPaymentRecord, Product, Settlement, StudentProfile, User
+from .payment_pricing import payment_row_collection_amount, per_session_teacher_settlement_gross
+from .session_carryover import list_carryovers_for_teacher_month, teacher_carryover_net_total
 from .settlement_sync import (
     DEFAULT_WITHHOLDING_RATE,
     SETTLEMENT_FEE_MULTIPLIER,
@@ -14,6 +16,46 @@ from .settlement_sync import (
 )
 
 REGULAR_SETTLEMENT_TYPES = frozenset({"monthly", "per_session"})
+
+
+def _month_short_label(billing_month: Optional[str]) -> str:
+    if not billing_month or len(str(billing_month)) < 7:
+        return "-"
+    try:
+        return f"{int(str(billing_month).split('-')[1])}월"
+    except ValueError:
+        return str(billing_month)
+
+
+def _build_carryover_label(
+    *,
+    carryover_in: Optional[dict[str, Any]],
+    carryover_out: Optional[dict[str, Any]],
+) -> str:
+    if carryover_in and _safe_int(carryover_in.get("session_count")) > 0:
+        count = _safe_int(carryover_in["session_count"])
+        source = _month_short_label(carryover_in.get("source_billing_month"))
+        return f"{count}회 ({source} 이월)"
+    if carryover_out and _safe_int(carryover_out.get("session_count")) > 0:
+        count = _safe_int(carryover_out["session_count"])
+        target = _month_short_label(carryover_out.get("settlement_billing_month"))
+        return f"{count}회 → {target}"
+    return "-"
+
+
+def _carryover_delta_display(
+    *,
+    carryover_in: Optional[dict[str, Any]],
+    carryover_out: Optional[dict[str, Any]],
+) -> tuple[int, str]:
+    """이월 회차: 익월로 빠지면 -, 전월에서 들어오면 +."""
+    if carryover_out and _safe_int(carryover_out.get("session_count")) > 0:
+        count = _safe_int(carryover_out["session_count"])
+        return -count, f"-{count}"
+    if carryover_in and _safe_int(carryover_in.get("session_count")) > 0:
+        count = _safe_int(carryover_in["session_count"])
+        return count, f"+{count}"
+    return 0, "-"
 
 
 def _safe_int(value) -> int:
@@ -94,6 +136,17 @@ def build_teacher_settlement_detail(
     per_session_completed_sessions = 0
     per_session_scheduled_amount = 0
     per_session_paid_amount = 0
+    carryover_out_by_enrollment: dict[int, dict[str, Any]] = {
+        int(item["enrollment_id"]): item
+        for item in list_carryovers_for_teacher_month(db, teacher_id=teacher_id, source_billing_month=billing_month)
+    }
+    carryover_in_by_enrollment: dict[int, dict[str, Any]] = {
+        int(item["enrollment_id"]): item
+        for item in list_carryovers_for_teacher_month(db, teacher_id=teacher_id, settlement_billing_month=billing_month)
+    }
+    carryover_lessons = list_carryovers_for_teacher_month(
+        db, teacher_id=teacher_id, settlement_billing_month=billing_month
+    )
     tuition_gross = 0
     tuition_teacher_share = 0
     weighted_rate_sum = 0.0
@@ -112,14 +165,37 @@ def build_teacher_settlement_detail(
             .scalar()
         )
         rate = _safe_float(row.commission_rate if row.commission_rate is not None else 60.0)
-        amount = _safe_int(row.final_amount)
+        collection_amount = payment_row_collection_amount(row)
+        teacher_gross = (
+            per_session_teacher_settlement_gross(row)
+            if row.billing_unit == "per_session"
+            else collection_amount
+        )
+        amount = collection_amount
         total_sessions = _safe_int(row.total_sessions)
         completed_sessions = _safe_int(row.completed_sessions)
         per_session_unit_price = int(round(_safe_int(row.base_amount) / total_sessions)) if total_sessions > 0 else 0
-        share = teacher_share_from_payment(amount, rate)
-        tuition_gross += amount
+        share = teacher_share_from_payment(teacher_gross, rate)
+        tuition_gross += collection_amount
         tuition_teacher_share += share
-        weighted_rate_sum += amount * rate
+        weighted_rate_sum += teacher_gross * rate
+        carryover_out = carryover_out_by_enrollment.get(int(row.enrollment_id or 0))
+        carryover_in = carryover_in_by_enrollment.get(int(row.enrollment_id or 0))
+        carryover_in_sessions = _safe_int(carryover_in["session_count"]) if carryover_in else 0
+        carryover_share_pre_tax = _safe_int(carryover_in["teacher_share"]) if carryover_in else 0
+        carryover_delta, carryover_display = _carryover_delta_display(
+            carryover_in=carryover_in,
+            carryover_out=carryover_out,
+        )
+        # 진행 = 예정(total_sessions) + 이월(±N) 회차 기준
+        progress_sessions = max(0, total_sessions + carryover_delta)
+        progress_gross_amount = (
+            progress_sessions * per_session_unit_price if per_session_unit_price > 0 else collection_amount
+        )
+        settlement_session_count = progress_sessions
+        settlement_gross_amount = progress_gross_amount
+        tuition_gross_amount = collection_amount
+        teacher_share_total = share + carryover_share_pre_tax
         regular_payments.append(
             {
                 "id": row.id,
@@ -130,11 +206,23 @@ def build_teacher_settlement_detail(
                 "billing_unit": row.billing_unit,
                 "total_sessions": total_sessions,
                 "completed_sessions": completed_sessions,
+                "carryover_sessions": _safe_int(carryover_out["session_count"]) if carryover_out else carryover_in_sessions,
+                "carryover_target_month": carryover_out["settlement_billing_month"] if carryover_out else None,
+                "carryover_label": _build_carryover_label(carryover_in=carryover_in, carryover_out=carryover_out),
+                "carryover_delta": carryover_delta,
+                "carryover_display": carryover_display,
+                "progress_sessions": progress_sessions,
+                "tuition_gross_amount": tuition_gross_amount,
+                "settlement_session_count": settlement_session_count,
+                "settlement_gross_amount": settlement_gross_amount,
                 "per_session_unit_price": per_session_unit_price,
                 "final_amount": amount,
                 "commission_rate": rate,
-                "teacher_share": share,
-                "company_share": max(0, amount - share),
+                "teacher_share": teacher_share_total,
+                "teacher_share_pre_tax": teacher_share_total,
+                "teacher_settlement_gross": teacher_gross,
+                "collection_amount": collection_amount,
+                "company_share": max(0, collection_amount - share),
                 "payment_tag": row.payment_tag,
                 "memo": row.memo,
             }
@@ -147,11 +235,8 @@ def build_teacher_settlement_detail(
             completed_s = max(0, min(completed_s, total_s)) if total_s > 0 else 0
             per_session_total_sessions += total_s
             per_session_completed_sessions += completed_s
-            per_session_paid_amount += amount
-            if total_s > 0 and completed_s > 0:
-                per_session_scheduled_amount += int(round(amount * total_s / completed_s))
-            else:
-                per_session_scheduled_amount += amount
+            per_session_paid_amount += collection_amount
+            per_session_scheduled_amount += collection_amount
         else:
             regular_monthly_payments.append(pay_row)
 
@@ -249,6 +334,17 @@ def build_teacher_settlement_detail(
         trial_withholding = settlement_fee_from_teacher_share(trial_pre_tax)
         trial_net = net_after_settlement_fee(trial_pre_tax)
 
+    carryover_pre_tax = sum(_safe_int(item["teacher_share"]) for item in carryover_lessons)
+    carryover_withholding = sum(
+        settlement_fee_from_teacher_share(_safe_int(item["teacher_share"])) for item in carryover_lessons
+    )
+    carryover_net = teacher_carryover_net_total(db, teacher_id, billing_month)
+
+    regular_tuition_pre_tax += carryover_pre_tax
+    regular_withholding += carryover_withholding
+    regular_net += carryover_net
+    tuition_gross += sum(_safe_int(item["gross_amount"]) for item in carryover_lessons)
+
     total_pre_tax = regular_tuition_pre_tax + trial_pre_tax
     total_withholding = regular_withholding + trial_withholding
     total_net = regular_net + trial_net
@@ -277,13 +373,13 @@ def build_teacher_settlement_detail(
                 "tuition_gross": tuition_gross,
                 "commission_rate": round(commission_rate, 2),
                 "teacher_share_pre_tax": regular_tuition_pre_tax,
-                "company_share": max(0, tuition_gross - tuition_teacher_share),
+                "company_share": max(0, tuition_gross - tuition_teacher_share - carryover_pre_tax),
                 "settlement_fee_rate": SETTLEMENT_FEE_RATE,
                 "settlement_fee_multiplier": SETTLEMENT_FEE_MULTIPLIER,
                 "settlement_fee_amount": regular_withholding,
                 "withholding_amount": regular_withholding,
                 "net_amount": regular_net if regular_net else net_after_settlement_fee(regular_tuition_pre_tax),
-                "formula": f"선생님 몫 × {SETTLEMENT_FEE_MULTIPLIER}",
+                "formula": f"선생님 몫 × {SETTLEMENT_FEE_MULTIPLIER} (이월 보강 포함)",
             },
             "trial": {
                 "label": "시범 수업",
@@ -306,6 +402,7 @@ def build_teacher_settlement_detail(
         },
         "regular_monthly_payments": regular_monthly_payments,
         "regular_per_session_payments": regular_per_session_payments,
+        "carryover_lessons": [],
         "per_session_summary": {
             "total_sessions": per_session_total_sessions,
             "completed_sessions": per_session_completed_sessions,

@@ -9,6 +9,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from .models import MonthlyPaymentRecord, Settlement
+from .payment_pricing import payment_row_collection_amount, per_session_teacher_settlement_gross
 
 
 # 정규·시범 지급: 선생님 몫(세전) × SETTLEMENT_FEE_MULTIPLIER (= 1 - 3.3% 정산 수수료)
@@ -36,6 +37,14 @@ def _safe_int(value) -> int:
         return 0
 
 
+def _settlement_gross_for_payment(row: MonthlyPaymentRecord) -> int:
+    """선생님 정산 집계: 회차별은 진행 회차만, 월별·특이금액은 수납 기준."""
+    unit = str(row.billing_unit or "").strip() or "monthly"
+    if unit == "per_session":
+        return per_session_teacher_settlement_gross(row)
+    return payment_row_collection_amount(row)
+
+
 def _recalculate_settlement(row: Settlement) -> None:
     rate = float(row.commission_rate or 60.0)
     gross = _safe_int(row.gross_amount)
@@ -61,42 +70,38 @@ def sync_settlements_from_payments(
     monthly_payment_records(학생 수납) 기반으로 settlements(선생님 지급)을 upsert.
 
     - settlement_type: monthly_payment_records.billing_unit (monthly|per_session)
-    - gross_amount: SUM(final_amount)
-    - commission_rate: 가중평균( final_amount * commission_rate / SUM(final_amount) )
+    - gross_amount: 회차별은 진행 회차×단가 합, 월별은 final_amount 합
+    - commission_rate: 가중평균( gross * commission_rate / SUM(gross) )
     """
-    q = db.query(
-        MonthlyPaymentRecord.teacher_id,
-        MonthlyPaymentRecord.billing_month,
-        MonthlyPaymentRecord.billing_unit,
-        func.count(MonthlyPaymentRecord.id).label("row_count"),
-        func.coalesce(func.sum(MonthlyPaymentRecord.final_amount), 0).label("gross_amount"),
-        func.coalesce(
-            func.sum(MonthlyPaymentRecord.final_amount * func.coalesce(MonthlyPaymentRecord.commission_rate, 60.0)),
-            0.0,
-        ).label("weighted_rate_sum"),
-    )
-
+    q = db.query(MonthlyPaymentRecord)
     if billing_month:
         q = q.filter(MonthlyPaymentRecord.billing_month == billing_month)
     if teacher_id:
         q = q.filter(MonthlyPaymentRecord.teacher_id == teacher_id)
 
-    q = q.group_by(
-        MonthlyPaymentRecord.teacher_id,
-        MonthlyPaymentRecord.billing_month,
-        MonthlyPaymentRecord.billing_unit,
-    )
-
-    changed = 0
-    for t_id, month, unit, row_count, gross_sum, weighted_rate_sum in q.all():
-        unit = str(unit or "").strip() or "monthly"
+    buckets: dict[tuple[int, str, str], SettlementAgg] = {}
+    row_counts: dict[tuple[int, str, str], int] = {}
+    for row in q.all():
+        unit = str(row.billing_unit or "").strip() or "monthly"
         if unit not in ("monthly", "per_session"):
             continue
+        key = (int(row.teacher_id), str(row.billing_month), unit)
+        gross = _settlement_gross_for_payment(row)
+        rate = float(row.commission_rate if row.commission_rate is not None else 60.0)
+        row_counts[key] = row_counts.get(key, 0) + 1
+        if key not in buckets:
+            buckets[key] = SettlementAgg(gross_amount=0, weighted_rate_sum=0.0)
+        prev = buckets[key]
+        buckets[key] = SettlementAgg(
+            gross_amount=prev.gross_amount + gross,
+            weighted_rate_sum=prev.weighted_rate_sum + gross * rate,
+        )
 
-        if _safe_int(row_count) <= 0:
+    changed = 0
+    for (t_id, month, unit), agg in buckets.items():
+        row_count = row_counts.get((t_id, month, unit), 0)
+        if row_count <= 0:
             continue
-
-        agg = SettlementAgg(gross_amount=_safe_int(gross_sum), weighted_rate_sum=float(weighted_rate_sum or 0.0))
 
         row = (
             db.query(Settlement)
@@ -156,6 +161,8 @@ def prune_settlements_without_payments(
 
     removed = 0
     for settlement in q.all():
+        if str(settlement.settlement_type or "") == "carryover":
+            continue
         payment_count = (
             db.query(MonthlyPaymentRecord)
             .filter(

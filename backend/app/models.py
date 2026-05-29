@@ -115,6 +115,26 @@ class MonthlyPaymentRecord(Base):
     memo = Column(Text, nullable=True)
 
 
+class SessionCarryover(Base):
+    """전월 미진행 회차 → 익월 보강(학생 수납과 분리, 선생님 추가 정산)."""
+
+    __tablename__ = "session_carryovers"
+
+    id = Column(Integer, primary_key=True)
+    enrollment_id = Column(Integer, ForeignKey("lesson_enrollments.id"), nullable=False)
+    student_id = Column(Integer, ForeignKey("student_profiles.id"), nullable=False)
+    teacher_id = Column(Integer, ForeignKey("teacher_profiles.id"), nullable=False)
+    source_payment_record_id = Column(Integer, ForeignKey("monthly_payment_records.id"), nullable=True)
+    source_billing_month = Column(String, nullable=False)
+    settlement_billing_month = Column(String, nullable=False)
+    session_count = Column(Integer, nullable=False, default=1)
+    unit_price = Column(Integer, nullable=False, default=0)
+    commission_rate = Column(Float, nullable=False, default=60.0)
+    status = Column(String, nullable=False, default="scheduled")
+    memo = Column(Text, nullable=True)
+    created_at = Column(String, nullable=True)
+
+
 class Settlement(Base):
     __tablename__ = "settlements"
 

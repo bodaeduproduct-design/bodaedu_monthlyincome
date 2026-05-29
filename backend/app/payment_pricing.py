@@ -230,8 +230,85 @@ def quote_payment_for_month(
     )
 
 
+def has_special_amount(row: MonthlyPaymentRecord) -> bool:
+    return int(row.special_amount or 0) > 0
+
+
+def resolve_final_amount(*, priced_amount: int, special_amount: int, refund_amount: int) -> int:
+    """특이금액이 있으면 최종금액 = 특이금액(환불 차감), 없으면 산출금액 기준."""
+    special = int(special_amount or 0)
+    refund = int(refund_amount or 0)
+    if special > 0:
+        return max(0, special - refund)
+    return max(0, int(priced_amount or 0) - refund)
+
+
+def per_session_unit_price_from_row(row: MonthlyPaymentRecord) -> int:
+    total = int(row.total_sessions or 0)
+    if total <= 0:
+        return 0
+    return int(round(int(row.base_amount or 0) / total))
+
+
+def per_session_scheduled_collection_amount(row: MonthlyPaymentRecord) -> int:
+    """학생 수납: 예정 회차 전액(미진행분 환불 없음)."""
+    total = int(row.total_sessions or 0)
+    unit = per_session_unit_price_from_row(row)
+    if total > 0 and unit > 0:
+        return unit * total
+    return int(row.base_amount or row.final_amount or 0)
+
+
+def per_session_teacher_settlement_gross(row: MonthlyPaymentRecord) -> int:
+    """선생님 당월 정산: 실제 진행 회차만."""
+    if has_special_amount(row):
+        return int(row.special_amount or 0)
+    total = int(row.total_sessions or 0)
+    completed = int(row.completed_sessions or 0)
+    if total > 0:
+        completed = max(0, min(completed, total))
+    elif completed <= 0:
+        completed = total
+    unit = per_session_unit_price_from_row(row)
+    if unit > 0 and completed > 0:
+        return unit * completed
+    return int(row.final_amount or 0)
+
+
+def payment_row_collection_amount(row: MonthlyPaymentRecord) -> int:
+    """매출·학생 수납 집계용."""
+    if str(row.billing_unit or "").strip() == "per_session":
+        if has_special_amount(row):
+            return resolve_final_amount(
+                priced_amount=0,
+                special_amount=int(row.special_amount or 0),
+                refund_amount=int(row.refund_amount or 0),
+            )
+        return per_session_scheduled_collection_amount(row)
+    return int(row.final_amount or 0)
+
+
+def recompute_payment_final_amount(row: MonthlyPaymentRecord, *, priced_amount: Optional[int] = None) -> None:
+    if priced_amount is None:
+        if str(row.billing_unit or "").strip() == "per_session":
+            priced_amount = per_session_scheduled_collection_amount(row)
+        else:
+            priced_amount = int(row.base_amount or 0)
+    row.final_amount = resolve_final_amount(
+        priced_amount=int(priced_amount or 0),
+        special_amount=int(row.special_amount or 0),
+        refund_amount=int(row.refund_amount or 0),
+    )
+    if has_special_amount(row) and row.final_amount > 0:
+        row.payment_tag = "special"
+    elif row.final_amount <= 0 and str(row.payment_tag or "").strip().lower() == "special":
+        row.payment_tag = "unpaid"
+
+
 def should_auto_apply_pricing(row: MonthlyPaymentRecord) -> bool:
-    """특별결제(special) 등 수동 조정 행은 금액 자동 덮어쓰기 안 함."""
+    """특이금액·특별결제(special) 행은 금액 자동 덮어쓰기 안 함."""
+    if has_special_amount(row):
+        return False
     tag = str(row.payment_tag or "").strip().lower()
     return tag != "special"
 
@@ -260,7 +337,7 @@ def apply_pricing_to_payment_row(
     row.billing_unit = quote.billing_unit
     row.total_sessions = int(quote.total_sessions or 0)
     if quote.billing_unit == "per_session":
-        # 회당 수업은 "총 횟수"와 "완료 횟수"를 분리해 관리하고, 지급은 완료 횟수 기준으로 계산합니다.
+        # 학생 수납=예정 전액, 미진행 회차는 익월 선생님 이월 정산.
         unit_price = int(round(quote.base_amount / row.total_sessions)) if row.total_sessions > 0 else 0
         completed = int(row.completed_sessions or 0)
         if completed <= 0 and row.total_sessions > 0:
@@ -268,17 +345,16 @@ def apply_pricing_to_payment_row(
         completed = max(0, min(completed, row.total_sessions)) if row.total_sessions > 0 else 0
         row.completed_sessions = completed
         row.base_amount = unit_price * row.total_sessions
-        priced_amount = unit_price * completed
+        priced_amount = row.base_amount
     else:
         row.base_amount = quote.base_amount
         priced_amount = quote.base_amount
-    special = int(row.special_amount or 0)
-    refund = int(row.refund_amount or 0)
-    row.final_amount = max(0, priced_amount + special - refund)
-    if row.final_amount <= 0 and quote.payment_tag != "first_month":
-        row.payment_tag = "unpaid"
-    else:
-        row.payment_tag = quote.payment_tag
+    recompute_payment_final_amount(row, priced_amount=priced_amount)
+    if not has_special_amount(row):
+        if row.final_amount <= 0 and quote.payment_tag != "first_month":
+            row.payment_tag = "unpaid"
+        else:
+            row.payment_tag = quote.payment_tag
 
     after = (
         row.billing_unit,
@@ -288,3 +364,33 @@ def apply_pricing_to_payment_row(
         row.payment_tag,
     )
     return before != after
+
+
+def refresh_all_per_session_payment_amounts(db: Session) -> int:
+    """회차별 수납 final_amount = 예정 전액으로 일괄 재계산."""
+    from .models import LessonEnrollment, Product
+
+    rows = (
+        db.query(MonthlyPaymentRecord)
+        .filter(MonthlyPaymentRecord.billing_unit == "per_session")
+        .all()
+    )
+    changed = 0
+    for row in rows:
+        before = (int(row.base_amount or 0), int(row.final_amount or 0))
+        if has_special_amount(row):
+            recompute_payment_final_amount(row)
+        else:
+            enrollment = (
+                db.query(LessonEnrollment).filter(LessonEnrollment.id == row.enrollment_id).first()
+            )
+            product = db.get(Product, enrollment.product_id) if enrollment and enrollment.product_id else None
+            if enrollment and apply_pricing_to_payment_row(db, row, enrollment, product):
+                changed += 1
+                continue
+            recompute_payment_final_amount(row)
+        after = (int(row.base_amount or 0), int(row.final_amount or 0))
+        if before != after:
+            changed += 1
+    db.flush()
+    return changed

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import date
+import base64
 import os
+import re
 import smtplib
 from email.message import EmailMessage
 from typing import Any, Optional
@@ -28,6 +30,13 @@ from .db_schema_migrate import apply_table_renames
 from .billing_sync import sync_all_trial_enrollments
 from .enrollment_billing import resolve_next_billing, sync_all_next_billing
 from .settlement_detail import build_teacher_settlement_detail
+from .payment_pricing import refresh_all_per_session_payment_amounts
+from .session_carryover import (
+    ensure_may_june_2026_carryovers,
+    sync_carryovers_from_per_session_gaps,
+    teacher_carryover_net_total,
+)
+from .special_payments import ensure_seojaehyun_may_2026_special_payments, refresh_special_payment_final_amounts
 from .settlement_sync import (
     SETTLEMENT_FEE_MULTIPLIER,
     prune_settlements_without_payments,
@@ -93,9 +102,15 @@ class TeacherEmailPayload(BaseModel):
     email: Optional[str] = None
 
 
+class TeacherEmailAttachment(BaseModel):
+    teacher_id: int
+    png_base64: str
+
+
 class SettlementEmailSendPayload(BaseModel):
     billing_month: str
     teacher_ids: Optional[list[int]] = None
+    attachments: Optional[list[TeacherEmailAttachment]] = None
 
 
 def _safe_int(value: Any) -> int:
@@ -308,6 +323,50 @@ def _teacher_month_billing_counts(db: Session, teacher_id: int, billing_month: s
         "trial_student_count": len(trial_students),
         "trial_only_student_count": len(trial_students - billing_students),
         "total_student_count": len(billing_students | trial_students),
+    }
+
+
+def _teacher_settlement_breakdown(db: Session, teacher_id: int, billing_month: str) -> dict[str, int]:
+    """선생님·월 정산: 유형별 세전·세후 + 합계 (목록 화면용)."""
+    rows = (
+        db.query(Settlement)
+        .filter(Settlement.teacher_id == teacher_id, Settlement.billing_month == billing_month)
+        .all()
+    )
+    monthly_pre_tax = 0
+    monthly_net = 0
+    per_session_pre_tax = 0
+    per_session_net = 0
+    carryover_pre_tax = 0
+    carryover_net = 0
+    for row in rows:
+        settlement_type = str(row.settlement_type or "")
+        pre_tax = _safe_int(row.pre_tax_amount)
+        net = _safe_int(row.net_amount)
+        if settlement_type == "monthly":
+            monthly_pre_tax += pre_tax
+            monthly_net += net
+        elif settlement_type == "per_session":
+            per_session_pre_tax += pre_tax
+            per_session_net += net
+        elif settlement_type == "carryover":
+            carryover_pre_tax += pre_tax
+            carryover_net += net
+
+    trial_pre_tax, trial_net = _teacher_trial_totals_for_month(db, teacher_id, billing_month)
+    total_pre_tax = monthly_pre_tax + per_session_pre_tax + trial_pre_tax + carryover_pre_tax
+    total_net = monthly_net + per_session_net + trial_net + carryover_net
+    return {
+        "monthly_pre_tax_amount": monthly_pre_tax,
+        "monthly_net_amount": monthly_net,
+        "per_session_pre_tax_amount": per_session_pre_tax,
+        "per_session_net_amount": per_session_net,
+        "trial_pre_tax_amount": trial_pre_tax,
+        "trial_net_amount": trial_net,
+        "carryover_pre_tax_amount": carryover_pre_tax,
+        "carryover_net_amount": carryover_net,
+        "pre_tax_amount": total_pre_tax,
+        "net_amount": total_net,
     }
 
 
@@ -789,11 +848,19 @@ def _ensure_schema() -> None:
     try:
         # 수업 → 월별 수납 레코드 자동 생성(미납=0)
         sync_monthly_payment_records_from_enrollments(db)
+        refresh_all_per_session_payment_amounts(db)
+        for line in sync_carryovers_from_per_session_gaps(db):
+            pass
         # 월별 수납 → 선생님 정산 자동 갱신 (월별/회당)
         sync_settlements_from_payments(db)
         prune_settlements_without_payments(db)
         sync_all_trial_enrollments(db)
         sync_all_next_billing(db)
+        for line in ensure_may_june_2026_carryovers(db):
+            pass
+        refresh_special_payment_final_amounts(db)
+        for line in ensure_seojaehyun_may_2026_special_payments(db):
+            pass
         db.commit()
     finally:
         db.close()
@@ -1244,10 +1311,16 @@ def list_teacher_settlements(month: Optional[str] = None, db: Session = Depends(
                 "teacher_status": str(teacher_status).lower(),
                 "gross_amount": 0,
                 "trial_fee": 0,
+                "pre_tax_amount": 0,
                 "net_amount": 0,
+                "monthly_pre_tax_amount": 0,
                 "monthly_net_amount": 0,
+                "per_session_pre_tax_amount": 0,
                 "per_session_net_amount": 0,
+                "trial_pre_tax_amount": 0,
                 "trial_net_amount": 0,
+                "carryover_pre_tax_amount": 0,
+                "carryover_net_amount": 0,
             }
         agg = aggregated_map[key]
         agg["gross_amount"] += gross_i
@@ -1259,6 +1332,8 @@ def list_teacher_settlements(month: Optional[str] = None, db: Session = Depends(
             agg["per_session_net_amount"] += net_i
         elif settlement_type == "trial":
             agg["trial_net_amount"] += net_i
+        elif settlement_type == "carryover":
+            agg["carryover_net_amount"] += net_i
 
     # 시범만 있는 선생님(정산 행 없음)도 목록에 포함
     if month:
@@ -1290,22 +1365,25 @@ def list_teacher_settlements(month: Optional[str] = None, db: Session = Depends(
                     "teacher_status": str(teacher_status).lower(),
                     "gross_amount": 0,
                     "trial_fee": 0,
+                    "pre_tax_amount": 0,
                     "net_amount": 0,
+                    "monthly_pre_tax_amount": 0,
                     "monthly_net_amount": 0,
+                    "per_session_pre_tax_amount": 0,
                     "per_session_net_amount": 0,
+                    "trial_pre_tax_amount": 0,
                     "trial_net_amount": 0,
+                    "carryover_pre_tax_amount": 0,
+                    "carryover_net_amount": 0,
                 }
 
     for key, agg in aggregated_map.items():
         billing_month, teacher_id = key
-        trial_fee, trial_net = _teacher_trial_totals_for_month(db, int(teacher_id), str(billing_month))
+        breakdown = _teacher_settlement_breakdown(db, int(teacher_id), str(billing_month))
+        agg.update(breakdown)
+        agg["trial_fee"] = breakdown["trial_pre_tax_amount"]
         recalculated = _teacher_net_by_unit_from_payments(db, int(teacher_id), str(billing_month))
-        agg["monthly_net_amount"] = recalculated["monthly_net_amount"]
-        agg["per_session_net_amount"] = recalculated["per_session_net_amount"]
         agg["gross_amount"] = recalculated["monthly_gross_amount"] + recalculated["per_session_gross_amount"]
-        agg["trial_fee"] = trial_fee
-        agg["trial_net_amount"] = trial_net
-        agg["net_amount"] = agg["monthly_net_amount"] + agg["per_session_net_amount"] + trial_net
         agg.update(_teacher_month_billing_counts(db, int(teacher_id), str(billing_month)))
 
     aggregated = sorted(aggregated_map.values(), key=lambda row: row["net_amount"], reverse=True)
@@ -1392,7 +1470,27 @@ def update_teacher_email(teacher_id: int, payload: TeacherEmailPayload, db: Sess
     return {"ok": True, "teacher_id": teacher_id, "email": user.email}
 
 
-def _send_settlement_email(to_email: str, *, teacher_name: str, billing_month: str, net_amount: int) -> None:
+def _decode_png_base64(value: str) -> bytes:
+    raw = (value or "").strip()
+    if "," in raw:
+        raw = raw.split(",", 1)[1]
+    return base64.b64decode(raw)
+
+
+def _safe_attachment_filename(teacher_name: str, billing_month: str) -> str:
+    safe_name = re.sub(r'[\\/:*?"<>|]', "_", str(teacher_name or "teacher").strip()) or "teacher"
+    safe_month = re.sub(r'[\\/:*?"<>|]', "_", str(billing_month or "month").strip()) or "month"
+    return f"정산서_{safe_name}_{safe_month}.png"
+
+
+def _send_settlement_email(
+    to_email: str,
+    *,
+    teacher_name: str,
+    billing_month: str,
+    net_amount: int,
+    png_bytes: Optional[bytes] = None,
+) -> None:
     host = (os.getenv("SMTP_HOST") or "").strip()
     port = int(os.getenv("SMTP_PORT") or "587")
     username = (os.getenv("SMTP_USER") or "").strip()
@@ -1407,11 +1505,16 @@ def _send_settlement_email(to_email: str, *, teacher_name: str, billing_month: s
         )
 
     subject = f"[보다수학] {billing_month} 정산 내역 안내 ({teacher_name})"
+    detail_line = (
+        "상세 내역은 첨부된 정산서 이미지를 확인해 주세요.\n"
+        if png_bytes
+        else "상세 내역은 정산 화면에서 확인해 주세요.\n"
+    )
     body = (
-        f"{teacher_name} 선생님,\n\n"
+        f"{teacher_name} 선생님\n\n"
         f"{billing_month} 정산 내역을 안내드립니다.\n"
         f"- 최종 정산금액: {format_currency(net_amount)}\n\n"
-        "상세 내역은 정산 이미지를 확인해 주세요.\n"
+        f"{detail_line}"
         "감사합니다."
     )
     message = EmailMessage()
@@ -1419,6 +1522,13 @@ def _send_settlement_email(to_email: str, *, teacher_name: str, billing_month: s
     message["From"] = from_email
     message["To"] = to_email
     message.set_content(body)
+    if png_bytes:
+        message.add_attachment(
+            png_bytes,
+            maintype="image",
+            subtype="png",
+            filename=_safe_attachment_filename(teacher_name, billing_month),
+        )
 
     with smtplib.SMTP(host, port, timeout=20) as smtp:
         if use_tls:
@@ -1441,6 +1551,13 @@ def send_teacher_settlement_emails(payload: SettlementEmailSendPayload, db: Sess
     if not billing_month:
         raise HTTPException(status_code=400, detail="billing_month는 필수입니다.")
     selected_teacher_ids = {int(tid) for tid in (payload.teacher_ids or []) if tid is not None}
+    attachment_by_teacher: dict[int, bytes] = {}
+    for item in payload.attachments or []:
+        try:
+            attachment_by_teacher[int(item.teacher_id)] = _decode_png_base64(item.png_base64)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"첨부 이미지 디코딩 실패 (teacher_id={item.teacher_id}): {exc}") from exc
+
     rows = (
         db.query(
             Settlement.teacher_id,
@@ -1466,8 +1583,21 @@ def send_teacher_settlement_emails(payload: SettlementEmailSendPayload, db: Sess
             skipped.append({"teacher_id": int(teacher_id), "teacher_name": teacher_name, "reason": "email 없음"})
             continue
         try:
-            _send_settlement_email(email, teacher_name=teacher_name, billing_month=billing_month, net_amount=_safe_int(net_amount))
-            sent.append({"teacher_id": int(teacher_id), "teacher_name": teacher_name, "email": email})
+            _send_settlement_email(
+                email,
+                teacher_name=teacher_name,
+                billing_month=billing_month,
+                net_amount=_safe_int(net_amount),
+                png_bytes=attachment_by_teacher.get(int(teacher_id)),
+            )
+            sent.append(
+                {
+                    "teacher_id": int(teacher_id),
+                    "teacher_name": teacher_name,
+                    "email": email,
+                    "has_attachment": int(teacher_id) in attachment_by_teacher,
+                }
+            )
         except Exception as exc:
             failed.append(
                 {
@@ -1967,6 +2097,7 @@ def student_detail(student_id: int, month: Optional[str] = None, db: Session = D
             "id": row.id,
             "billing_month": row.billing_month,
             "teacher_id": row.teacher_id,
+            "teacher_name": _teacher_name_by_profile_id(db, row.teacher_id),
             "enrollment_id": row.enrollment_id,
             "billing_unit": row.billing_unit,
             "product_name": product_name_by_enrollment.get(row.enrollment_id),

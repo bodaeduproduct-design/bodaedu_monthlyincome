@@ -5,6 +5,8 @@ import DataAdminView from './DataAdminView.jsx'
 import DataOverviewView from './DataOverviewView.jsx'
 import DataRegisterView from './DataRegisterView.jsx'
 import DbSchemaView from './DbSchemaView.jsx'
+import MonthPicker from './MonthPicker.jsx'
+import TeacherSettlementDetailBody from './TeacherSettlementDetailBody.jsx'
 import './App.css'
 import './tokens/wanted-components.css'
 
@@ -78,22 +80,39 @@ function formatMoM(value, rate) {
 }
 
 async function apiRequest(path, options = {}) {
-  const response = await fetch(path, {
-    headers: { 'Content-Type': 'application/json', ...(options.headers ?? {}) },
-    ...options,
-  })
+  let response
+  try {
+    response = await fetch(path, {
+      headers: { 'Content-Type': 'application/json', ...(options.headers ?? {}) },
+      ...options,
+    })
+  } catch {
+    throw new Error(
+      '서버에 연결할 수 없습니다. 백엔드(uvicorn --port 8001)가 실행 중인지 확인한 뒤 새로고침해 주세요.',
+    )
+  }
   if (!response.ok) {
     let detail = '요청 처리 중 오류가 발생했습니다.'
     try {
       const data = await response.json()
-      detail = data.detail ?? detail
+      if (typeof data.detail === 'string') detail = data.detail
+      else if (Array.isArray(data.detail)) {
+        detail = data.detail.map((item) => item?.msg ?? JSON.stringify(item)).join(', ')
+      }
     } catch {
-      // ignore
+      if (response.status === 502 || response.status === 503) {
+        detail =
+          '백엔드 서버에 연결하지 못했습니다. 잠시 후 새로고침하거나 uvicorn(8001) 실행 여부를 확인해 주세요.'
+      }
     }
     throw new Error(detail)
   }
   if (response.status === 204) return null
   return response.json()
+}
+
+function waitMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function SectionCard({ title, description, actions, children }) {
@@ -198,24 +217,34 @@ export default function BodaApp() {
     const load = async () => {
       setLoading(true)
       setError('')
-      try {
-        const res = await apiRequest('/api/app-data')
-        if (!cancelled) {
-          setAppData(res)
-          const monthsFromApi = res?.meta?.available_months ?? []
-          const currentKey = currentMonthKey()
-          const defaultMonth = monthsFromApi.includes(currentKey)
-            ? currentKey
-            : res?.meta?.default_month || res?.meta?.latest_month || ''
-          setSelectedMonth((current) => current || defaultMonth)
+      const maxAttempts = 4
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        try {
+          const res = await apiRequest('/api/app-data')
+          if (!cancelled) {
+            setAppData(res)
+            const monthsFromApi = res?.meta?.available_months ?? []
+            const currentKey = currentMonthKey()
+            const defaultMonth = monthsFromApi.includes(currentKey)
+              ? currentKey
+              : res?.meta?.default_month || res?.meta?.latest_month || ''
+            setSelectedMonth((current) => current || defaultMonth)
+          }
+          return
+        } catch (e) {
+          if (cancelled) return
+          if (attempt < maxAttempts) {
+            await waitMs(600 * attempt)
+            continue
+          }
+          setError(e.message)
         }
-      } catch (e) {
-        if (!cancelled) setError(e.message)
-      } finally {
-        if (!cancelled) setLoading(false)
       }
+      if (!cancelled) setLoading(false)
     }
-    load()
+    load().finally(() => {
+      if (!cancelled) setLoading(false)
+    })
     return () => {
       cancelled = true
     }
@@ -505,6 +534,8 @@ export default function BodaApp() {
   const teacherListCaptureRef = useRef(null)
   const [teacherDetailExporting, setTeacherDetailExporting] = useState(false)
   const teacherDetailCaptureRef = useRef(null)
+  const emailCaptureRef = useRef(null)
+  const [emailCaptureDetail, setEmailCaptureDetail] = useState(null)
 
   useEffect(() => {
     if (selectedPage !== 'teacher-settlements' || !selectedMonth) return
@@ -547,9 +578,10 @@ export default function BodaApp() {
     const rows = teacherAggregated ?? []
     return {
       teacherCount: rows.length,
-      totalMonthly: rows.reduce((sum, row) => sum + (row.monthly_net_amount ?? 0), 0),
-      totalPerSession: rows.reduce((sum, row) => sum + (row.per_session_net_amount ?? 0), 0),
-      totalTrial: rows.reduce((sum, row) => sum + (row.trial_net_amount ?? 0), 0),
+      totalMonthlyPreTax: rows.reduce((sum, row) => sum + (row.monthly_pre_tax_amount ?? 0), 0),
+      totalPerSessionPreTax: rows.reduce((sum, row) => sum + (row.per_session_pre_tax_amount ?? 0), 0),
+      totalTrialPreTax: rows.reduce((sum, row) => sum + (row.trial_pre_tax_amount ?? 0), 0),
+      totalPreTax: rows.reduce((sum, row) => sum + (row.pre_tax_amount ?? 0), 0),
     }
   }, [teacherAggregated])
 
@@ -570,6 +602,42 @@ export default function BodaApp() {
   const selectedTeacherIds = useMemo(() => {
     return teacherEmailRows.filter((row) => teacherEmailSelection[row.teacher_id]).map((row) => row.teacher_id)
   }, [teacherEmailRows, teacherEmailSelection])
+
+  const waitForPaint = () =>
+    new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve))
+    })
+
+  const buildTeacherEmailAttachments = async (teacherIds, billingMonth) => {
+    const attachments = []
+    for (let index = 0; index < teacherIds.length; index += 1) {
+      const teacherId = teacherIds[index]
+      const row = teacherEmailRows.find((item) => item.teacher_id === teacherId)
+      setTeacherNotice(
+        `정산서 이미지 준비 중 (${index + 1}/${teacherIds.length})… ${row?.teacher_name ?? ''}`,
+      )
+      const detail = await apiRequest(
+        `/api/teachers/${teacherId}/settlements/${encodeURIComponent(billingMonth)}`,
+      )
+      setEmailCaptureDetail(detail)
+      await waitForPaint()
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      if (!emailCaptureRef.current) {
+        throw new Error('이미지 캡처 영역을 찾을 수 없습니다.')
+      }
+      const canvas = await html2canvas(emailCaptureRef.current, {
+        backgroundColor: '#ffffff',
+        scale: 2,
+        useCORS: true,
+      })
+      attachments.push({
+        teacher_id: teacherId,
+        png_base64: canvas.toDataURL('image/png').split(',')[1],
+      })
+    }
+    setEmailCaptureDetail(null)
+    return attachments
+  }
 
   const renderTeacherSettlements = () => (
     <>
@@ -632,8 +700,12 @@ export default function BodaApp() {
           </div>
         }
       >
-        {teacherNotice ? <div className="banner success">{teacherNotice}</div> : null}
-        {teacherError ? <div className="banner error">{teacherError}</div> : null}
+        {teacherNotice || teacherError ? (
+          <div className="teacher-settlement-alerts">
+            {teacherNotice ? <div className="banner success">{teacherNotice}</div> : null}
+            {teacherError ? <div className="banner error">{teacherError}</div> : null}
+          </div>
+        ) : null}
         {(rateAdjustments?.notice_count ?? 0) > 0 ? (
           <div className="banner rate-adjust-banner">
             <span className="rate-adjust-banner__message">
@@ -657,10 +729,14 @@ export default function BodaApp() {
           <div className="teacher-report-layout" ref={teacherListCaptureRef}>
             <div className="teacher-settlement-summary">
               <SettlementMetric label="정산 대상 선생님" value={`${teacherOverview.teacherCount}명`} />
-              <SettlementMetric label="월별 지급 합계" value={formatCurrency(teacherOverview.totalMonthly)} />
-              <SettlementMetric label="회차별 지급 합계" value={formatCurrency(teacherOverview.totalPerSession)} />
-              <SettlementMetric label="시범 지급 합계" value={formatCurrency(teacherOverview.totalTrial)} />
-              <SettlementMetric label="총 지급 합계" value={formatCurrency(teacherTotals.net_amount)} />
+              <SettlementMetric label="월별 수업 (세전)" value={formatCurrency(teacherOverview.totalMonthlyPreTax)} />
+              <SettlementMetric label="회차별 수업 (세전)" value={formatCurrency(teacherOverview.totalPerSessionPreTax)} />
+              <SettlementMetric label="시범 수업 (세전)" value={formatCurrency(teacherOverview.totalTrialPreTax)} />
+              <SettlementMetric
+                label="최종 정산 합계 (세후)"
+                value={formatCurrency(teacherTotals.net_amount)}
+                sub={`세전 ${formatCurrency(teacherOverview.totalPreTax)}`}
+              />
             </div>
 
             <div className="table-wrap settlement-overview-wrap">
@@ -669,10 +745,10 @@ export default function BodaApp() {
                   <tr>
                     <th>선생님</th>
                     <th>담당학생수</th>
-                    <th>월별 수업</th>
-                    <th>회차별 수업</th>
-                    <th>시범 수업</th>
-                    <th>최종 정산금액</th>
+                    <th>월별 수업 (세전)</th>
+                    <th>회차별 수업 (세전)</th>
+                    <th>시범 수업 (세전)</th>
+                    <th>최종 정산 (세후)</th>
                     <th>상세</th>
                   </tr>
                 </thead>
@@ -685,12 +761,12 @@ export default function BodaApp() {
                       <td>
                         <strong>{row.billing_student_count ?? 0}명</strong>
                       </td>
-                      <td>{formatCurrency(row.monthly_net_amount)}</td>
-                      <td>{formatCurrency(row.per_session_net_amount)}</td>
-                      <td>{formatCurrency(row.trial_net_amount)}</td>
+                      <td>{formatCurrency(row.monthly_pre_tax_amount ?? 0)}</td>
+                      <td>{formatCurrency(row.per_session_pre_tax_amount ?? 0)}</td>
+                      <td>{formatCurrency(row.trial_pre_tax_amount ?? 0)}</td>
                       <td>
                         <strong>{formatCurrency(row.net_amount)}</strong>
-                        <small className="table-sub">{formatCurrency(row.gross_amount)}</small>
+                        <small className="table-sub">{formatCurrency(row.pre_tax_amount ?? 0)}</small>
                       </td>
                       <td>
                         <button
@@ -772,162 +848,7 @@ export default function BodaApp() {
           {teacherDetailLoading ? <div className="empty-state compact">불러오는 중...</div> : null}
           {teacherDetailError ? <div className="banner error">{teacherDetailError}</div> : null}
           {!teacherDetailLoading && !teacherDetailError ? (
-            <div className="teacher-detail-modal">
-              {teacherDetail.payout_flow ? (
-                <>
-                  <section className="teacher-payout-total teacher-payout-total--plain">
-                    <div className="teacher-payout-total__main">
-                      <span>최종 지급액</span>
-                      <strong>{formatCurrency(teacherDetail.payout_flow.total?.net_amount)}</strong>
-                    </div>
-                  </section>
-
-                  <div className="teacher-payout-summary-row">
-                    <section className="teacher-payout-summary-card">
-                      <span>정규 수업료 지급액</span>
-                      <strong>{formatCurrency(teacherDetail.payout_flow.regular?.net_amount)}</strong>
-                      <p>
-                        수업료(세전)
-                        {formatCurrency(teacherDetail.payout_flow.regular?.teacher_share_pre_tax)} - 수수료
-                        {formatCurrency(
-                          teacherDetail.payout_flow.regular?.settlement_fee_amount ??
-                            teacherDetail.payout_flow.regular?.withholding_amount,
-                        )}
-                      </p>
-                    </section>
-                    <section className="teacher-payout-summary-card">
-                      <span>시범 수업료 지급액</span>
-                      <strong>{formatCurrency(teacherDetail.payout_flow.trial?.net_amount)}</strong>
-                    </section>
-                  </div>
-                </>
-              ) : null}
-
-              <section className="teacher-detail-block teacher-detail-block--flat">
-                {(teacherDetail.regular_payments ?? teacherDetail.lesson_records ?? []).length === 0 ? (
-                  <div className="empty-state compact">해당 월 정규 수납이 없습니다.</div>
-                ) : (
-                  <div>
-                    <div className="teacher-detail-block__header">
-                      <h4>월별 수업</h4>
-                      <span>{(teacherDetail.regular_monthly_payments ?? []).length}건</span>
-                    </div>
-                    {(teacherDetail.regular_monthly_payments ?? []).length === 0 ? (
-                      <div className="empty-state compact">해당 월 월별 수업이 없습니다.</div>
-                    ) : (
-                      <div className="table-wrap">
-                        <table className="settlement-overview-table">
-                          <thead>
-                            <tr>
-                              <th>학생</th>
-                              <th>상품</th>
-                              <th>수납액</th>
-                              <th>수수료율</th>
-                              <th>정산 수업료</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {(teacherDetail.regular_monthly_payments ?? []).map((row) => (
-                              <tr key={row.id}>
-                                <td>{row.student_name ?? `학생#${row.student_id}`}</td>
-                                <td>{row.product_name ?? '-'}</td>
-                                <td>{formatCurrency(row.final_amount)}</td>
-                                <td>{row.commission_rate != null ? `${row.commission_rate}%` : '-'}</td>
-                                <td>
-                                  <strong>{formatCurrency(row.teacher_share ?? row.final_amount)}</strong>
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
-
-                    <div className="teacher-detail-subsection teacher-detail-subsection--per-session">
-                      <div className="teacher-detail-block__header">
-                        <h4>회차별 수업</h4>
-                        <span>{(teacherDetail.regular_per_session_payments ?? []).length}건</span>
-                      </div>
-                      {(teacherDetail.regular_per_session_payments ?? []).length === 0 ? (
-                        <div className="empty-state compact">해당 월 회차별 수업이 없습니다.</div>
-                      ) : (
-                        <div className="table-wrap">
-                          <table className="settlement-overview-table">
-                            <thead>
-                              <tr>
-                                <th>학생</th>
-                                <th>상품</th>
-                                <th>회차별 단가</th>
-                                <th>총횟수</th>
-                                <th>완료횟수</th>
-                                <th>정산 수납액</th>
-                                <th>수수료율</th>
-                              <th>정산 수업료</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {(teacherDetail.regular_per_session_payments ?? []).map((row) => (
-                                <tr key={row.id}>
-                                  <td>{row.student_name ?? `학생#${row.student_id}`}</td>
-                                  <td>{row.product_name ?? '-'}</td>
-                                  <td>{formatCurrency(row.per_session_unit_price ?? 0)}</td>
-                                  <td>{row.total_sessions ?? 0}</td>
-                                  <td>{row.completed_sessions ?? 0}</td>
-                                  <td>{formatCurrency(row.final_amount)}</td>
-                                  <td>{row.commission_rate != null ? `${row.commission_rate}%` : '-'}</td>
-                                  <td>
-                                    <strong>{formatCurrency(row.teacher_share ?? row.final_amount)}</strong>
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </section>
-
-              <section className="teacher-detail-block teacher-detail-block--flat">
-                <div className="teacher-detail-block__header teacher-detail-block__header--trial">
-                  <h4>시범 수업</h4>
-                  <span>{(teacherDetail.trial_lessons ?? []).length}건</span>
-                </div>
-                {(teacherDetail.trial_lessons ?? []).length === 0 ? (
-                  <div className="empty-state compact">해당 월 시범 수업이 없습니다.</div>
-                ) : (
-                  <div className="table-wrap">
-                    <table className="settlement-overview-table">
-                      <thead>
-                        <tr>
-                          <th>학생</th>
-                          <th>시범일</th>
-                          <th>시범비</th>
-                          <th>세전</th>
-                          <th>정산 수수료</th>
-                          <th>지급액</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {(teacherDetail.trial_lessons ?? []).map((row) => (
-                          <tr key={row.enrollment_id}>
-                            <td>{row.student_name}</td>
-                            <td>{row.trial_date ?? '-'}</td>
-                            <td>{formatCurrency(row.trial_fee)}</td>
-                            <td>{formatCurrency(row.pre_tax_amount)}</td>
-                            <td>{formatCurrency(row.withholding_amount)}</td>
-                            <td>
-                              <strong>{formatCurrency(row.net_amount)}</strong>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </section>
-            </div>
+            <TeacherSettlementDetailBody detail={teacherDetail} formatCurrency={formatCurrency} />
           ) : null}
         </DetailModal>
       ) : null}
@@ -984,20 +905,44 @@ export default function BodaApp() {
               className="primary-button"
               disabled={teacherEmailSending || selectedTeacherIds.length === 0}
               onClick={async () => {
-                if (!window.confirm(`${selectedTeacherIds.length}명에게 메일을 발송할까요?`)) return
+                if (
+                  !window.confirm(
+                    `${selectedTeacherIds.length}명에게 정산서 이미지(PNG)를 첨부해 메일을 발송할까요?`,
+                  )
+                ) {
+                  return
+                }
                 setTeacherEmailSending(true)
                 setTeacherError('')
                 setTeacherNotice('')
                 try {
+                  const attachments = await buildTeacherEmailAttachments(selectedTeacherIds, selectedMonth)
+                  setTeacherNotice('메일 발송 중…')
                   const res = await apiRequest('/api/teachers/settlements/send-email', {
                     method: 'POST',
-                    body: JSON.stringify({ billing_month: selectedMonth, teacher_ids: selectedTeacherIds }),
+                    body: JSON.stringify({
+                      billing_month: selectedMonth,
+                      teacher_ids: selectedTeacherIds,
+                      attachments,
+                    }),
                   })
-                  setTeacherNotice(
-                    `메일 발송 완료: 성공 ${res.sent_count}건 / 스킵 ${res.skipped_count}건 / 실패 ${res.failed_count}건`,
-                  )
-                  setTeacherEmailModalOpen(false)
+                  const failedReasons = (res.failed ?? [])
+                    .map((row) => `${row.teacher_name ?? row.teacher_id}: ${row.reason ?? '실패'}`)
+                    .slice(0, 3)
+                  if ((res.failed_count ?? 0) > 0) {
+                    const suffix = failedReasons.length ? ` (${failedReasons.join(' / ')})` : ''
+                    setTeacherError(
+                      `메일 발송 실패 ${res.failed_count}건 / 성공 ${res.sent_count}건 / 스킵 ${res.skipped_count}건${suffix}`,
+                    )
+                    setTeacherNotice('')
+                  } else {
+                    setTeacherNotice(
+                      `메일 발송 완료: 성공 ${res.sent_count}건 / 스킵 ${res.skipped_count}건`,
+                    )
+                    setTeacherEmailModalOpen(false)
+                  }
                 } catch (e) {
+                  setEmailCaptureDetail(null)
                   setTeacherError(e.message || '메일 발송에 실패했습니다.')
                 } finally {
                   setTeacherEmailSending(false)
@@ -1008,51 +953,73 @@ export default function BodaApp() {
             </button>
           }
         >
-          <div className="teacher-email-select-tools">
-            <label>
-              <input
-                type="checkbox"
-                checked={teacherEmailRows.length > 0 && selectedTeacherIds.length === teacherEmailRows.length}
-                onChange={(e) => {
-                  const checked = e.target.checked
-                  const next = {}
-                  for (const row of teacherEmailRows) {
-                    next[row.teacher_id] = checked
-                  }
-                  setTeacherEmailSelection(next)
-                }}
-              />{' '}
-              전체 선택
-            </label>
-          </div>
-          <div className="table-wrap settlement-overview-wrap">
-            <table className="settlement-overview-table">
-              <thead>
-                <tr>
-                  <th>선택</th>
-                  <th>선생님</th>
-                  <th>이메일</th>
-                </tr>
-              </thead>
-              <tbody>
-                {teacherEmailRows.map((row) => (
-                  <tr key={`mail-${row.teacher_id}`}>
-                    <td>
-                      <input
-                        type="checkbox"
-                        checked={!!teacherEmailSelection[row.teacher_id]}
-                        onChange={(e) =>
-                          setTeacherEmailSelection((prev) => ({
-                            ...prev,
-                            [row.teacher_id]: e.target.checked,
-                          }))
-                        }
-                      />
-                    </td>
-                    <td>{row.teacher_name}</td>
-                    <td>{row.teacher_email || '-'}</td>
+          <div className="teacher-email-send">
+            <div className="teacher-email-send__toolbar">
+              <label className="teacher-email-send__select-all">
+                <input
+                  type="checkbox"
+                  className="teacher-email-send__checkbox"
+                  checked={teacherEmailRows.length > 0 && selectedTeacherIds.length === teacherEmailRows.length}
+                  onChange={(e) => {
+                    const checked = e.target.checked
+                    const next = {}
+                    for (const row of teacherEmailRows) {
+                      next[row.teacher_id] = checked
+                    }
+                    setTeacherEmailSelection(next)
+                  }}
+                />
+                <span className="teacher-email-send__checkbox-ui" aria-hidden="true" />
+                <span>전체 선택</span>
+              </label>
+              <span className="teacher-email-send__count">{selectedTeacherIds.length}명 선택</span>
+            </div>
+            <div className="table-wrap teacher-email-send__table-wrap">
+              <table className="teacher-email-send-table">
+                <colgroup>
+                  <col className="teacher-email-send-table__col-check" />
+                  <col className="teacher-email-send-table__col-name" />
+                  <col className="teacher-email-send-table__col-email" />
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th scope="col" className="teacher-email-send-table__check">
+                      선택
+                    </th>
+                    <th scope="col" className="teacher-email-send-table__name">
+                      선생님
+                    </th>
+                    <th scope="col" className="teacher-email-send-table__email">
+                      이메일
+                    </th>
                   </tr>
-                ))}
+                </thead>
+                <tbody>
+                  {teacherEmailRows.map((row) => (
+                    <tr
+                      key={`mail-${row.teacher_id}`}
+                      className={teacherEmailSelection[row.teacher_id] ? 'is-selected' : undefined}
+                    >
+                      <td className="teacher-email-send-table__check">
+                        <label className="teacher-email-send__row-check">
+                          <input
+                            type="checkbox"
+                            className="teacher-email-send__checkbox"
+                            checked={!!teacherEmailSelection[row.teacher_id]}
+                            onChange={(e) =>
+                              setTeacherEmailSelection((prev) => ({
+                                ...prev,
+                                [row.teacher_id]: e.target.checked,
+                              }))
+                            }
+                          />
+                          <span className="teacher-email-send__checkbox-ui" aria-hidden="true" />
+                        </label>
+                      </td>
+                      <td className="teacher-email-send-table__name">{row.teacher_name}</td>
+                      <td className="teacher-email-send-table__email">{row.teacher_email || '-'}</td>
+                    </tr>
+                  ))}
                 {teacherEmailRows.length === 0 ? (
                   <tr>
                     <td colSpan={3} className="students-table-empty">
@@ -1060,11 +1027,16 @@ export default function BodaApp() {
                     </td>
                   </tr>
                 ) : null}
-              </tbody>
-            </table>
+                </tbody>
+              </table>
+            </div>
           </div>
         </DetailModal>
       ) : null}
+
+      <div className="teacher-email-capture-host" ref={emailCaptureRef} aria-hidden="true">
+        <TeacherSettlementDetailBody detail={emailCaptureDetail} formatCurrency={formatCurrency} />
+      </div>
     </>
   )
 
@@ -1214,7 +1186,7 @@ export default function BodaApp() {
     <div className="students-layout">
       <SectionCard
         title="학생 수납"
-        description="선택 월 기준 수납 완료/미납을 분리해 확인합니다. 미납은 월초 확인용으로 바로 노출됩니다."
+        description="선택한 조회 월 기준 수납 금액만 표시합니다. 미납은 월초 확인용으로 바로 노출됩니다."
         actions={
           <div className="filter-chips">
             <button
@@ -1377,7 +1349,7 @@ export default function BodaApp() {
                       <th>담당 선생님</th>
                       <th>결제기준</th>
                       <th>결제수단</th>
-                      <th>상태</th>
+                      <th>{formatMonth(selectedMonth)} 수납</th>
                       <th>수납상태</th>
                       <th>상세</th>
                     </tr>
@@ -1395,7 +1367,13 @@ export default function BodaApp() {
                           {(student.payment_methods ?? []).map((m) => formatPaymentMethodLabel(m)).join(', ') || '-'}
                         </td>
                         <td>
-                          <strong className="students-amount--pending">미납 / 예정</strong>
+                          {studentDisplayAmount(student, studentBillingFilter) > 0 ? (
+                            <strong className="students-amount--pending">
+                              {formatCurrency(studentDisplayAmount(student, studentBillingFilter))}
+                            </strong>
+                          ) : (
+                            <strong className="students-amount--pending">미납 / 예정</strong>
+                          )}
                         </td>
                         <td>
                           <button
@@ -1450,22 +1428,35 @@ export default function BodaApp() {
           {studentDetailError ? <div className="banner error">{studentDetailError}</div> : null}
           {studentDetail ? (
             <div className="student-detail-modal">
-              <div className="student-detail-kpis">
-                <article className="student-detail-kpi">
-                  <span>총 결제 금액</span>
-                  <strong>{formatCurrency(studentDetailSummary.totalPaymentAmount)}</strong>
+              <div className="student-detail-summary">
+                <article className="student-detail-summary-card">
+                  <span className="student-detail-summary-card__label">총 결제 금액</span>
+                  <p className="student-detail-summary-card__value">
+                    {formatCurrency(studentDetailSummary.totalPaymentAmount)}
+                  </p>
+                  <span className="student-detail-summary-card__hint">
+                    {formatMonth(studentDetail.billing_month ?? selectedMonth)} 기준
+                  </span>
                 </article>
-                <article className="student-detail-kpi">
-                  <span>이번달 총 수업 횟수</span>
-                  <strong>{studentDetailSummary.totalSessions}회</strong>
+                <article className="student-detail-summary-card">
+                  <span className="student-detail-summary-card__label">이번달 총 수업 횟수</span>
+                  <p className="student-detail-summary-card__value">
+                    {studentDetailSummary.totalSessions}
+                    <span className="student-detail-summary-card__unit">회</span>
+                  </p>
                 </article>
-                <article className="student-detail-kpi">
-                  <span>수업 요일</span>
-                  <strong>{studentDetailSummary.weekdayText}</strong>
+                <article className="student-detail-summary-card">
+                  <span className="student-detail-summary-card__label">수업 요일</span>
+                  <p className="student-detail-summary-card__value student-detail-summary-card__value--text">
+                    {studentDetailSummary.weekdayText}
+                  </p>
                 </article>
-                <article className="student-detail-kpi">
-                  <span>총 진행 수업 횟수</span>
-                  <strong>{studentDetailSummary.completedSessions}회</strong>
+                <article className="student-detail-summary-card">
+                  <span className="student-detail-summary-card__label">총 진행 수업 횟수</span>
+                  <p className="student-detail-summary-card__value">
+                    {studentDetailSummary.completedSessions}
+                    <span className="student-detail-summary-card__unit">회</span>
+                  </p>
                 </article>
               </div>
 
@@ -1477,14 +1468,14 @@ export default function BodaApp() {
                   <div className="empty-state compact">이번달 수납 내역이 없습니다.</div>
                 ) : (
                   <div className="table-wrap">
-                    <table className="settlement-overview-table">
+                    <table className="settlement-overview-table student-payment-table">
                       <thead>
                         <tr>
                           <th>선생님</th>
                           <th>상품</th>
                           <th>결제기준</th>
                           <th>결제수단</th>
-                          <th>금액</th>
+                          <th className="col-amount">금액</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1494,7 +1485,7 @@ export default function BodaApp() {
                             <td>{row.product_name ?? '-'}</td>
                             <td>{row.billing_unit ? settlementTypeLabel(row.billing_unit) : '-'}</td>
                             <td>{row.payment_method ? formatPaymentMethodLabel(row.payment_method) : '-'}</td>
-                            <td>
+                            <td className="col-amount">
                               <strong>{formatCurrency(row.final_amount)}</strong>
                             </td>
                           </tr>
@@ -1514,14 +1505,15 @@ export default function BodaApp() {
                   <div className="empty-state compact">이전 수납 내역이 없습니다.</div>
                 ) : (
                   <div className="table-wrap">
-                    <table className="settlement-overview-table">
+                    <table className="settlement-overview-table student-payment-table">
                       <thead>
                         <tr>
                           <th>월</th>
+                          <th>선생님</th>
                           <th>상품</th>
                           <th>결제기준</th>
                           <th>결제수단</th>
-                          <th>금액</th>
+                          <th className="col-amount">금액</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1535,10 +1527,11 @@ export default function BodaApp() {
                                 ) : null}
                               </span>
                             </td>
+                            <td>{row.teacher_name ?? (row.teacher_id ? `선생님#${row.teacher_id}` : '-')}</td>
                             <td>{row.product_name ?? '-'}</td>
                             <td>{row.billing_unit ? settlementTypeLabel(row.billing_unit) : '-'}</td>
                             <td>{row.payment_method ? formatPaymentMethodLabel(row.payment_method) : '-'}</td>
-                            <td>{formatCurrency(row.final_amount)}</td>
+                            <td className="col-amount">{formatCurrency(row.final_amount)}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -1757,22 +1750,30 @@ export default function BodaApp() {
               </div>
               {showMonthToolbar ? (
                 <div className="toolbar">
-                  <label className="toolbar-field">
-                    <span>조회 월</span>
-                    <select value={selectedMonth} onChange={(e) => setSelectedMonth(e.target.value)}>
-                      {months.map((m) => (
-                        <option key={m} value={m}>
-                          {formatMonth(m)}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                  <MonthPicker
+                    label="조회 월"
+                    value={selectedMonth}
+                    onChange={setSelectedMonth}
+                    availableMonths={months}
+                  />
                 </div>
               ) : null}
             </header>
 
           <div className="page-panel__body">
-            {error ? <div className="banner error">{error}</div> : null}
+            {error ? (
+              <div className="banner error">
+                {error}
+                <button
+                  type="button"
+                  className="ghost-button"
+                  style={{ marginLeft: '0.75rem' }}
+                  onClick={() => window.location.reload()}
+                >
+                  새로고침
+                </button>
+              </div>
+            ) : null}
               {isDbPage(selectedPage) ? renderDbSubNav() : null}
               {loading && !appData && !isDbPage(selectedPage) ? (
                 <div className="empty-state">불러오는 중...</div>
