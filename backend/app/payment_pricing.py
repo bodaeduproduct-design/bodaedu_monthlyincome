@@ -309,6 +309,8 @@ def should_auto_apply_pricing(row: MonthlyPaymentRecord) -> bool:
     """특이금액·특별결제(special) 행은 금액 자동 덮어쓰기 안 함."""
     if has_special_amount(row):
         return False
+    if str(row.memo or "").startswith("[sheet]"):
+        return False
     tag = str(row.payment_tag or "").strip().lower()
     return tag != "special"
 

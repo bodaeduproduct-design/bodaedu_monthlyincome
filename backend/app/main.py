@@ -36,6 +36,13 @@ from .session_carryover import (
     sync_carryovers_from_per_session_gaps,
     teacher_carryover_net_total,
 )
+from .sheet_revenue_sync import default_workbook_path, sync_payment_records_from_workbook
+from .teacher_commission import (
+    TEACHER_FIXED_COMMISSION_RATES,
+    apply_commission_rates_sync,
+    expected_commission_rate_by_tenure,
+    resolve_commission_rate,
+)
 from .special_payments import ensure_seojaehyun_may_2026_special_payments, refresh_special_payment_final_amounts
 from .settlement_sync import (
     SETTLEMENT_FEE_MULTIPLIER,
@@ -848,6 +855,9 @@ def _ensure_schema() -> None:
     try:
         # 수업 → 월별 수납 레코드 자동 생성(미납=0)
         sync_monthly_payment_records_from_enrollments(db)
+        sheet_path = default_workbook_path()
+        if sheet_path.is_file():
+            sync_payment_records_from_workbook(db, workbook_path=sheet_path, min_month="2026-05")
         refresh_all_per_session_payment_amounts(db)
         for line in sync_carryovers_from_per_session_gaps(db):
             pass
@@ -861,6 +871,8 @@ def _ensure_schema() -> None:
         refresh_special_payment_final_amounts(db)
         for line in ensure_seojaehyun_may_2026_special_payments(db):
             pass
+        _fix_lee_seokgyu_enrollment_start_dates(db)
+        apply_commission_rates_sync(db)
         db.commit()
     finally:
         db.close()
@@ -1682,21 +1694,18 @@ def _parse_date_only(value: Optional[str]) -> Optional[date]:
         return None
 
 
-COMMISSION_EXCLUDED_TEACHERS = {"신태준", "서재현", "윤성민"}
-
-
-def _expected_commission_rate_by_tenure(start: date, billing_month: str) -> float:
-    target_month = _parse_date_only(f"{billing_month}-01")
-    if not target_month:
-        return 60.0
-    elapsed_months = (target_month.year - start.year) * 12 + (target_month.month - start.month)
-    # 개월차 기준: 7개월차부터 65%, 13개월차부터 70%
-    # (elapsed_months는 0부터 시작하므로 7개월차=6, 13개월차=12)
-    if elapsed_months >= 12:
-        return 70.0
-    if elapsed_months >= 6:
-        return 65.0
-    return 60.0
+def _fix_lee_seokgyu_enrollment_start_dates(db: Session) -> None:
+    """이석규 학생 수업 시작일을 2025-09-01로 맞춰 7개월차 수수료 상향이 적용되게 합니다."""
+    rows = (
+        db.query(LessonEnrollment)
+        .join(StudentProfile, StudentProfile.id == LessonEnrollment.student_id)
+        .join(User, User.id == StudentProfile.user_id)
+        .filter(User.name == "이석규")
+        .all()
+    )
+    for enrollment in rows:
+        if enrollment.start_date and str(enrollment.start_date).startswith("2025-09"):
+            enrollment.start_date = "2025-09-01"
 
 
 def _auto_adjust_commission_rates_for_month(db: Session, billing_month: str) -> dict[str, Any]:
@@ -1721,17 +1730,19 @@ def _auto_adjust_commission_rates_for_month(db: Session, billing_month: str) -> 
 
     for payment, enrollment, teacher_name, teacher_user_id in rows:
         teacher_name = str(teacher_name or "").strip()
-        if teacher_name in COMMISSION_EXCLUDED_TEACHERS:
-            continue
         start = _parse_date_only(enrollment.start_date)
-        if not start:
+        if not start and teacher_name not in TEACHER_FIXED_COMMISSION_RATES:
             continue
-        expected = _expected_commission_rate_by_tenure(start, billing_month)
+        expected = resolve_commission_rate(teacher_name, enrollment, billing_month)
         current_rate = float(payment.commission_rate or 60.0)
-        elapsed_months = (_parse_date_only(f"{billing_month}-01").year - start.year) * 12 + (
-            _parse_date_only(f"{billing_month}-01").month - start.month
+        elapsed_months = 0
+        if start:
+            elapsed_months = (_parse_date_only(f"{billing_month}-01").year - start.year) * 12 + (
+                _parse_date_only(f"{billing_month}-01").month - start.month
+            )
+        is_notice_month = (
+            teacher_name not in TEACHER_FIXED_COMMISSION_RATES and elapsed_months in (6, 12)
         )
-        is_notice_month = elapsed_months in (6, 12)
         if is_notice_month:
             notice_entry = notice_by_teacher.setdefault(
                 int(payment.teacher_id),
@@ -1789,15 +1800,15 @@ def _auto_adjust_commission_rates_for_month(db: Session, billing_month: str) -> 
             start = _parse_date_only(enrollment.start_date)
             if not start:
                 continue
-            expected = _expected_commission_rate_by_tenure(start, billing_month)
+            expected = resolve_commission_rate(
+                _teacher_name_by_profile_id(db, int(enrollment.teacher_id)),
+                enrollment,
+                billing_month,
+            )
             enrollment.current_commission_rate = expected
 
-    # 변경된 선생님-월 정산을 재동기화
-    for teacher_id in touched_teacher_ids:
-        sync_settlements_from_payments(db, billing_month=billing_month, teacher_id=teacher_id)
-
-    if touched_teacher_ids:
-        db.flush()
+    # 고정·개월차 수수료 일괄 반영(누락분 보정)
+    apply_commission_rates_sync(db, billing_month=billing_month)
 
     changed_teachers = sorted(changed_by_teacher.values(), key=lambda x: x["teacher_name"])
     changed_count = sum(len(t["students"]) for t in changed_teachers)
@@ -2175,6 +2186,19 @@ def register_enrollment_endpoint(payload: RegisterEnrollmentPayload, db: Session
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/admin/sync-sheet-revenue")
+def admin_sync_sheet_revenue(
+    month: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """정산 관리 시트(sheet.xlsx) 기준으로 월별/회당 수납·정산을 맞춥니다."""
+    result = sync_payment_records_from_workbook(db, billing_month=month)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error") or "시트 동기화 실패")
+    db.commit()
+    return result
 
 
 @app.get("/api/admin/schemas")

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import html2canvas from 'html2canvas'
-import { formatPaymentMethodLabel, SimpleBarChart } from './charts.jsx'
+import { formatPaymentMethodLabel, SimpleBarChart, SimpleDonutChart } from './charts.jsx'
 import DataAdminView from './DataAdminView.jsx'
 import DataOverviewView from './DataOverviewView.jsx'
 import DataRegisterView from './DataRegisterView.jsx'
@@ -187,10 +187,7 @@ export default function BodaApp() {
   const [appData, setAppData] = useState(null)
   const [dashboardData, setDashboardData] = useState(null)
   const [dashboardLoading, setDashboardLoading] = useState(false)
-  const [dashboardStudentListOpen, setDashboardStudentListOpen] = useState(false)
-  const [dashboardStudentLists, setDashboardStudentLists] = useState(null)
-  const [dashboardStudentListsLoading, setDashboardStudentListsLoading] = useState(false)
-  const [dashboardStudentListsError, setDashboardStudentListsError] = useState('')
+  const [paymentSummary, setPaymentSummary] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [productFilter, setProductFilter] = useState('all')
@@ -271,6 +268,32 @@ export default function BodaApp() {
   }, [selectedPage, selectedMonth])
 
   useEffect(() => {
+    if ((selectedPage !== 'students' && selectedPage !== 'dashboard') || !selectedMonth) return
+    let cancelled = false
+    const load = async () => {
+      try {
+        const res = await apiRequest(`/api/students/payment-summary?month=${encodeURIComponent(selectedMonth)}`)
+        if (!cancelled) setPaymentSummary(res)
+      } catch {
+        if (!cancelled) setPaymentSummary(null)
+      }
+    }
+    load()
+    return () => {
+      cancelled = true
+    }
+  }, [selectedPage, selectedMonth])
+
+  const paymentDonutData = useMemo(
+    () =>
+      (paymentSummary?.items ?? []).map((row) => ({
+        label: formatPaymentMethodLabel(row.payment_method),
+        value: row.amount,
+      })),
+    [paymentSummary],
+  )
+
+  useEffect(() => {
     if (isDbPage(selectedPage)) {
       setLastDbPage(selectedPage)
     }
@@ -308,109 +331,60 @@ export default function BodaApp() {
       label: formatMonthShort(row.month),
       value: row.student_count,
     }))
-    const inquiryChartData = (dashboardData?.inquiry_trend_6m ?? []).map((row) => ({
-      label: formatMonthShort(row.month),
-      value: row.inquiry_count,
-    }))
     const momClass =
       summary.revenue_delta > 0 ? 'dash-sub muted-up' : summary.revenue_delta < 0 ? 'dash-sub muted-down' : 'dash-sub'
 
     return (
-      <>
       <div className="dash-board">
         <header className="dash-board__head">
-          <div className="dash-board__head-main">
+          <div>
             <h3 className="dash-board__title">{formatMonth(summary.billing_month)} 운영 현황</h3>
+            <p className="dash-board__desc">
+              학생 수납 기준 매출
+              {summary.revenue_source === 'settlements' ? ' · 수납 스냅샷 없음(정산 데이터 대체)' : ''}
+            </p>
           </div>
         </header>
 
-        <div className="dash-kpi dash-kpi--overview-top">
-          <article className="kpi-card kpi-card--revenue kpi-card--hero">
+        <div className="dash-kpi">
+          <article className="kpi-card">
             <span className="kpi-card__label">총매출</span>
-            <p className="kpi-card__value kpi-card__value--primary">{formatCurrency(summary.gross_revenue)}</p>
+            <p className="kpi-card__value">{formatCurrency(summary.gross_revenue)}</p>
+            <ul className="kpi-card__meta">
+              <li>월별 {formatCurrency(summary.monthly_revenue)}</li>
+              <li>회당 {formatCurrency(summary.per_session_revenue)}</li>
+            </ul>
             <p className={momClass}>{formatMoM(summary.revenue_delta, summary.revenue_delta_rate)}</p>
-            <p className="kpi-card__sub">순매출 {formatCurrency(summary.net_revenue)}</p>
           </article>
 
-          <article className="kpi-card kpi-card--compact kpi-card--inquiry">
-            <span className="kpi-card__label">신규 문의</span>
-            <p className="kpi-card__value">
-              {summary.new_inquiry_count ?? 0}
-              <span className="kpi-card__unit">건</span>
-            </p>
-            <p className={summary.inquiry_delta > 0 ? 'dash-sub muted-up' : summary.inquiry_delta < 0 ? 'dash-sub muted-down' : 'dash-sub'}>
-              전월 대비 {summary.inquiry_delta > 0 ? '+' : ''}
-              {(summary.inquiry_delta ?? 0).toLocaleString('ko-KR')}건
-            </p>
-            <p className="kpi-card__sub">
-              신규 {summary.new_first_payment_count ?? 0}명 | 시범 {summary.trial_lesson_count ?? 0}명
-            </p>
+          <article className="kpi-card">
+            <span className="kpi-card__label">순매출</span>
+            <p className="kpi-card__value">{formatCurrency(summary.net_revenue)}</p>
+            <ul className="kpi-card__meta">
+              <li>선생님 정산 {formatCurrency(summary.teacher_settlement)}</li>
+              <li>시범수업비 {formatCurrency(summary.trial_fee)}</li>
+            </ul>
           </article>
-        </div>
 
-        <div className="dash-kpi dash-kpi--overview-bottom">
-          <article
-            className="kpi-card kpi-card--compact kpi-card--student kpi-card--clickable"
-            onClick={async () => {
-              setDashboardStudentListOpen(true)
-              setDashboardStudentListsLoading(true)
-              setDashboardStudentListsError('')
-              try {
-                const res = await apiRequest(`/api/dashboard/student-lists?month=${encodeURIComponent(summary.billing_month)}`)
-                setDashboardStudentLists(res)
-              } catch (e) {
-                setDashboardStudentListsError(e.message || '수강학생 상세를 불러오지 못했습니다.')
-              } finally {
-                setDashboardStudentListsLoading(false)
-              }
-            }}
-          >
+          <article className="kpi-card kpi-card--compact">
             <span className="kpi-card__label">수강 학생</span>
             <p className="kpi-card__value">
               {summary.active_student_count}
               <span className="kpi-card__unit">명</span>
             </p>
-            <p className={summary.student_delta > 0 ? 'dash-sub muted-up' : summary.student_delta < 0 ? 'dash-sub muted-down' : 'dash-sub'}>
-              전월 대비 {summary.student_delta > 0 ? '+' : ''}
-              {(summary.student_delta ?? 0).toLocaleString('ko-KR')}명
-            </p>
-            <p className="kpi-card__sub">
-              신규 {summary.student_new_count ?? 0}명 | 탈회 {summary.student_exit_count ?? 0}명
-            </p>
           </article>
 
-          <article className="kpi-card kpi-card--compact kpi-card--teacher">
-            <span className="kpi-card__label">수업중인 선생님</span>
+          <article className="kpi-card kpi-card--compact">
+            <span className="kpi-card__label">활성 선생님</span>
             <p className="kpi-card__value">
-              {summary.active_teacher_count ?? 0}
+              {summary.active_teacher_count}
               <span className="kpi-card__unit">명</span>
-            </p>
-            <p className={summary.teacher_delta > 0 ? 'dash-sub muted-up' : summary.teacher_delta < 0 ? 'dash-sub muted-down' : 'dash-sub'}>
-              전월 대비 {summary.teacher_delta > 0 ? '+' : ''}
-              {(summary.teacher_delta ?? 0).toLocaleString('ko-KR')}명
-            </p>
-            <p className="kpi-card__sub">
-              활성 {summary.active_teacher_total ?? 0}명 중 | 종료 {summary.teacher_ended_count ?? 0}명
-            </p>
-          </article>
-
-          <article className="kpi-card kpi-card--compact kpi-card--collection">
-            <span className="kpi-card__label">수납 관리</span>
-            <p className="kpi-card__value">
-              {summary.collection_count ?? 0}
-              <span className="kpi-card__unit">건</span>
-            </p>
-            <p className="kpi-card__sub">
-              <span>완납 {summary.paid_count ?? 0}건</span> |{' '}
-              <span className={(summary.unpaid_count ?? 0) > 0 ? 'kpi-sub-danger' : ''}>
-                미납 {summary.unpaid_count ?? 0}건
-              </span>
             </p>
           </article>
         </div>
 
-        <div className="dash-charts dash-charts--top">
-          <section className="dash-chart-panel dash-chart-panel--revenue">
+        <div className="dash-charts">
+          <section className="dash-chart-panel">
             <header>
               <h4>매출 추이</h4>
               <span>최근 6개월 · 학생 수납 합계</span>
@@ -420,95 +394,26 @@ export default function BodaApp() {
               formatValue={(v) => `${Math.round(v / 10000).toLocaleString('ko-KR')}만`}
             />
           </section>
-          <section className="dash-chart-panel dash-chart-panel--student">
-            <header>
-              <h4>신규 문의 추이</h4>
-              <span>최근 6개월</span>
-            </header>
-            <SimpleBarChart data={inquiryChartData} unit="건" barColor="#475569" />
-          </section>
-        </div>
-        <div className="dash-charts dash-charts--bottom">
-          <section className="dash-chart-panel dash-chart-panel--student">
+          <section className="dash-chart-panel">
             <header>
               <h4>학생 수 추이</h4>
-              <span>최근 6개월</span>
+              <span>최근 6개월 · 수납 학생 수</span>
             </header>
             <SimpleBarChart data={studentChartData} unit="명" barColor="#475569" />
           </section>
+          <section className="dash-chart-panel">
+            <header>
+              <h4>결제 수단 분포</h4>
+              <span>
+                {paymentSummary?.billing_month
+                  ? `${formatMonth(paymentSummary.billing_month)} 수납 기준`
+                  : '조회 월 수납 기준'}
+              </span>
+            </header>
+            <SimpleDonutChart data={paymentDonutData} formatLabel={(label) => label} />
+          </section>
         </div>
       </div>
-      {dashboardStudentListOpen ? (
-        <DetailModal
-          open
-          title={`${formatMonth(summary.billing_month)} 수강학생 상세`}
-          onClose={() => {
-            setDashboardStudentListOpen(false)
-            setDashboardStudentLists(null)
-            setDashboardStudentListsError('')
-          }}
-        >
-          {dashboardStudentListsLoading ? <div className="empty-state compact">불러오는 중...</div> : null}
-          {dashboardStudentListsError ? <div className="banner error">{dashboardStudentListsError}</div> : null}
-          {!dashboardStudentListsLoading && !dashboardStudentListsError ? (
-            <div className="student-collection-sections">
-              <section className="student-collection-panel">
-                <div className="student-collection-panel__head">
-                  <h4>신규학생</h4>
-                  <span>{(dashboardStudentLists?.new_students ?? []).length}명</span>
-                </div>
-                <div className="table-wrap settlement-overview-wrap">
-                  <table className="settlement-overview-table">
-                    <thead>
-                      <tr>
-                        <th>학생</th>
-                        <th>담당 선생님</th>
-                        <th>상품</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(dashboardStudentLists?.new_students ?? []).map((student) => (
-                        <tr key={`new-${student.student_id}`}>
-                          <td>{student.student_name}</td>
-                          <td>{(student.teachers ?? []).join(', ') || '-'}</td>
-                          <td>{(student.products ?? []).join(', ') || '-'}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </section>
-              <section className="student-collection-panel">
-                <div className="student-collection-panel__head">
-                  <h4>탈회학생</h4>
-                  <span>{(dashboardStudentLists?.ended_students ?? []).length}명</span>
-                </div>
-                <div className="table-wrap settlement-overview-wrap">
-                  <table className="settlement-overview-table">
-                    <thead>
-                      <tr>
-                        <th>학생</th>
-                        <th>담당 선생님</th>
-                        <th>상품</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(dashboardStudentLists?.ended_students ?? []).map((student) => (
-                        <tr key={`ended-${student.student_id}`}>
-                          <td>{student.student_name}</td>
-                          <td>{(student.teachers ?? []).join(', ') || '-'}</td>
-                          <td>{(student.products ?? []).join(', ') || '-'}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </section>
-            </div>
-          ) : null}
-        </DetailModal>
-      ) : null}
-      </>
     )
   }
 

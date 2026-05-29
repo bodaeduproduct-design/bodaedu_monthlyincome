@@ -4010,9 +4010,15 @@ tbody tr:hover td {
   letter-spacing: -0.02em;
 }
 
+.dash-board__desc {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: #64748b;
+}
+
 .dash-kpi {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
 }
 
@@ -4080,10 +4086,6 @@ tbody tr:hover td {
   line-height: 1.08;
 }
 
-.kpi-card__value--primary {
-  color: #2563eb;
-}
-
 .kpi-card__unit {
   margin-left: 4px;
   font-size: 15px;
@@ -4108,27 +4110,6 @@ tbody tr:hover td {
   font-size: 12px;
   color: #64748b;
   font-weight: 600;
-}
-
-.kpi-card--revenue {
-  border-color: #dbeafe;
-}
-
-.kpi-card--net {
-  border-color: #e2e8f0;
-}
-
-.kpi-card--student {
-  border-color: #e5e7eb;
-}
-
-.kpi-card--teacher {
-  border-color: #e5e7eb;
-}
-
-.kpi-card--inquiry,
-.kpi-card--collection {
-  border-color: #e5e7eb;
 }
 
 .kpi-card__sub {
@@ -4199,14 +4180,6 @@ tbody tr:hover td {
   margin-top: 4px;
   font-size: 12px;
   color: #64748b;
-}
-
-.dash-chart-panel--revenue {
-  border-color: #dbeafe;
-}
-
-.dash-chart-panel--student {
-  border-color: #e2e8f0;
 }
 
 .chart-empty {

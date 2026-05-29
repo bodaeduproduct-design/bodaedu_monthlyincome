@@ -16,8 +16,9 @@ from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
 from .enrollment_billing import enrollment_covers_billing_month, parse_date_only
-from .models import LessonEnrollment, MonthlyPaymentRecord, Product
+from .models import LessonEnrollment, MonthlyPaymentRecord, Product, TeacherProfile, User
 from .payment_pricing import apply_pricing_to_payment_row
+from .teacher_commission import resolve_commission_rate
 
 
 @dataclass(frozen=True)
@@ -68,6 +69,9 @@ def _month_iter(start: MonthKey, end: MonthKey) -> Iterable[MonthKey]:
 
 
 def _billing_unit_for_enrollment(db: Session, enrollment: LessonEnrollment) -> str:
+    price_type = str(enrollment.price_type or "").strip().lower()
+    if price_type in ("session", "per_session"):
+        return "per_session"
     if enrollment.product_id:
         unit = db.query(Product.billing_unit).filter(Product.id == enrollment.product_id).scalar()
         unit = str(unit or "").strip()
@@ -76,11 +80,18 @@ def _billing_unit_for_enrollment(db: Session, enrollment: LessonEnrollment) -> s
     return "monthly"
 
 
-def _commission_rate_for_enrollment(enrollment: LessonEnrollment) -> float:
-    try:
-        return float(enrollment.current_commission_rate or enrollment.base_commission_rate or 60.0)
-    except (TypeError, ValueError):
-        return 60.0
+def _commission_rate_for_enrollment(
+    db: Session,
+    enrollment: LessonEnrollment,
+    billing_month: str,
+) -> float:
+    teacher_name = (
+        db.query(User.name)
+        .join(TeacherProfile, TeacherProfile.user_id == User.id)
+        .filter(TeacherProfile.id == enrollment.teacher_id)
+        .scalar()
+    )
+    return resolve_commission_rate(str(teacher_name or ""), enrollment, billing_month)
 
 
 def _last_billing_month_key(enrollment: LessonEnrollment, *, as_of: date) -> Optional[MonthKey]:
@@ -195,12 +206,12 @@ def sync_payment_records_for_enrollment(
         return prune_payment_records_outside_enrollment(db, enrollment)
 
     unit = _billing_unit_for_enrollment(db, enrollment)
-    rate = _commission_rate_for_enrollment(enrollment)
     changed = 0
 
     for mk in _month_iter(start_key, last_key):
         if not enrollment_covers_billing_month(enrollment, mk.text):
             continue
+        rate = _commission_rate_for_enrollment(db, enrollment, mk.text)
         row, row_changed = _get_or_create_monthly_row(db, enrollment, mk, unit=unit, rate=rate)
         if row_changed:
             changed += 1
