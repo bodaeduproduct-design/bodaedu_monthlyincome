@@ -8,3 +8,4 @@ boda.db
 
 frontend/node_modules/
 frontend/dist/
+frontend/exports/
