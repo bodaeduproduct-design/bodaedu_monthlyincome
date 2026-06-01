@@ -202,7 +202,7 @@ def ensure_may_june_2026_carryovers(db: Session) -> list[str]:
     log: list[str] = []
     specs = [
         {
-            "source_payment_record_id": 1,
+            "source_payment_record_id": 360,
             "enrollment_id": 83,
             "student_id": None,
             "teacher_id": 9,
@@ -216,7 +216,7 @@ def ensure_may_june_2026_carryovers(db: Session) -> list[str]:
             "memo": "5월 미진행 1회(10→9) → 6월 보강. 학생 수납은 10회 전액, 선생님 6월에 1회 추가 정산.",
         },
         {
-            "source_payment_record_id": 3,
+            "source_payment_record_id": 368,
             "enrollment_id": 87,
             "student_id": None,
             "teacher_id": 21,

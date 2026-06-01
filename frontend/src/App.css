@@ -2239,6 +2239,11 @@ tbody tr:hover td {
   text-align: center;
 }
 
+.unit-price-cell {
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
 .teacher-detail-modal .empty-state.compact {
   min-height: 40px;
   border-radius: 8px;

@@ -189,12 +189,18 @@ def build_teacher_settlement_detail(
         )
         # 진행 = 예정(total_sessions) + 이월(±N) 회차 기준
         progress_sessions = max(0, total_sessions + carryover_delta)
-        progress_gross_amount = (
-            progress_sessions * per_session_unit_price if per_session_unit_price > 0 else collection_amount
-        )
-        settlement_session_count = progress_sessions
-        settlement_gross_amount = progress_gross_amount
-        tuition_gross_amount = collection_amount
+        if row.billing_unit == "per_session" and per_session_unit_price > 0:
+            # 정산 수납액: 학생 수납 전액이 아니라 실진행(진행) 회차 × 회차당 단가
+            settlement_session_count = progress_sessions
+            settlement_gross_amount = progress_sessions * per_session_unit_price
+            tuition_gross_amount = collection_amount
+        else:
+            progress_gross_amount = (
+                progress_sessions * per_session_unit_price if per_session_unit_price > 0 else collection_amount
+            )
+            settlement_session_count = progress_sessions
+            settlement_gross_amount = progress_gross_amount
+            tuition_gross_amount = collection_amount
         teacher_share_total = share + carryover_share_pre_tax
         regular_payments.append(
             {
@@ -213,8 +219,10 @@ def build_teacher_settlement_detail(
                 "carryover_display": carryover_display,
                 "progress_sessions": progress_sessions,
                 "tuition_gross_amount": tuition_gross_amount,
+                "student_collection_amount": collection_amount,
                 "settlement_session_count": settlement_session_count,
                 "settlement_gross_amount": settlement_gross_amount,
+                "settlement_basis_amount": settlement_gross_amount,
                 "per_session_unit_price": per_session_unit_price,
                 "final_amount": amount,
                 "commission_rate": rate,
@@ -287,7 +295,7 @@ def build_teacher_settlement_detail(
     trial_lessons: list[dict[str, Any]] = []
     trial_enrollments = (
         db.query(LessonEnrollment, User.name)
-        .join(StudentProfile, StudentProfile.user_id == LessonEnrollment.student_id)
+        .join(StudentProfile, StudentProfile.id == LessonEnrollment.student_id)
         .join(User, User.id == StudentProfile.user_id)
         .filter(
             LessonEnrollment.teacher_id == teacher_id,
@@ -402,7 +410,7 @@ def build_teacher_settlement_detail(
         },
         "regular_monthly_payments": regular_monthly_payments,
         "regular_per_session_payments": regular_per_session_payments,
-        "carryover_lessons": [],
+        "carryover_lessons": carryover_lessons,
         "per_session_summary": {
             "total_sessions": per_session_total_sessions,
             "completed_sessions": per_session_completed_sessions,

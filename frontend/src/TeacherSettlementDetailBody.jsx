@@ -38,7 +38,7 @@ export default function TeacherSettlementDetailBody({ detail, formatCurrency }) 
           <span>{monthlyRows.length}건</span>
         </div>
         {monthlyRows.length === 0 ? (
-          <div className="empty-state compact">해당 월 월별 수금 학생이 없습니다.</div>
+          <div className="empty-state compact teacher-detail-empty--centered">해당 월 월별 수금 학생이 없습니다.</div>
         ) : (
           <div className="table-wrap">
             <table className="settlement-overview-table">
@@ -77,7 +77,7 @@ export default function TeacherSettlementDetailBody({ detail, formatCurrency }) 
           <span>{perSessionRows.length}건</span>
         </div>
         {perSessionRows.length === 0 ? (
-          <div className="empty-state compact">해당 월 회당 수금 학생이 없습니다.</div>
+          <div className="empty-state compact teacher-detail-empty--centered">해당 월 회당 수금 학생이 없습니다.</div>
         ) : (
           <div className="table-wrap">
             <table className="settlement-overview-table">
@@ -85,6 +85,7 @@ export default function TeacherSettlementDetailBody({ detail, formatCurrency }) 
                 <tr>
                   <th>학생</th>
                   <th>상품</th>
+                  <th>회차당 단가</th>
                   <th>예정</th>
                   <th>이월</th>
                   <th>진행</th>
@@ -98,6 +99,11 @@ export default function TeacherSettlementDetailBody({ detail, formatCurrency }) 
                   <tr key={row.id}>
                     <td>{row.student_name ?? `학생#${row.student_id}`}</td>
                     <td>{row.product_name ?? '-'}</td>
+                    <td className="unit-price-cell">
+                      {(row.per_session_unit_price ?? 0) > 0
+                        ? formatCurrency(row.per_session_unit_price)
+                        : '-'}
+                    </td>
                     <td>{row.total_sessions ?? 0}</td>
                     <td
                       className={
@@ -119,10 +125,12 @@ export default function TeacherSettlementDetailBody({ detail, formatCurrency }) 
                     </td>
                     <td>
                       {formatCurrency(
-                        row.tuition_gross_amount ??
-                          row.settlement_gross_amount ??
-                          row.progress_amount ??
-                          0,
+                        row.settlement_gross_amount ??
+                          row.settlement_basis_amount ??
+                          Math.max(
+                            0,
+                            (row.progress_sessions ?? 0) * (row.per_session_unit_price ?? 0),
+                          ),
                       )}
                     </td>
                     <td>{row.commission_rate != null ? `${row.commission_rate}%` : '-'}</td>

@@ -1695,17 +1695,23 @@ def _parse_date_only(value: Optional[str]) -> Optional[date]:
 
 
 def _fix_lee_seokgyu_enrollment_start_dates(db: Session) -> None:
-    """이석규 학생 수업 시작일을 2025-09-01로 맞춰 7개월차 수수료 상향이 적용되게 합니다."""
+    """이석규 학생 첫 수업 시작일을 2025-08-30으로 맞춰 개월차 수수료(7개월차 65%)가 맞게 적용되게 합니다."""
+    target_start = "2025-08-30"
     rows = (
         db.query(LessonEnrollment)
         .join(StudentProfile, StudentProfile.id == LessonEnrollment.student_id)
         .join(User, User.id == StudentProfile.user_id)
         .filter(User.name == "이석규")
+        .order_by(LessonEnrollment.id.asc())
         .all()
     )
     for enrollment in rows:
-        if enrollment.start_date and str(enrollment.start_date).startswith("2025-09"):
-            enrollment.start_date = "2025-09-01"
+        if not enrollment.start_date:
+            continue
+        start = str(enrollment.start_date).strip()[:10]
+        if start in ("2025-09-01", "2025-08-30") or start.startswith("2025-09"):
+            enrollment.start_date = target_start
+            break
 
 
 def _auto_adjust_commission_rates_for_month(db: Session, billing_month: str) -> dict[str, Any]:
