@@ -18,9 +18,18 @@ import './tokens/wanted-components.css'
 
 const MAIN_NAV_ITEMS = [
   { id: 'dashboard', label: '매출 및 운영 현황' },
+  { id: 'operations', label: '운영 관리' },
   { id: 'teacher-settlements', label: '선생님 정산' },
   { id: 'students', label: '학생 수납' },
   { id: 'catalogs', label: '상품 · 단가표' },
+]
+
+const OPERATIONS_TABS = [
+  { id: 'active', label: '수업 중' },
+  { id: 'trial', label: '시범 수업' },
+  { id: 'starting', label: '이번 달 시작' },
+  { id: 'ending', label: '이번 달 종료' },
+  { id: 'teachers', label: '선생님별' },
 ]
 
 const DB_SUB_NAV = [
@@ -87,6 +96,12 @@ function formatMoM(value, rate) {
   return `전월 대비 ${amount} (${sign}${rate}%)`
 }
 
+function formatCountMoM(delta, unit = '명') {
+  if (delta === null || delta === undefined) return '전월 대비 —'
+  const sign = delta > 0 ? '+' : ''
+  return `전월 대비 ${sign}${delta}${unit}`
+}
+
 async function apiRequest(path, options = {}) {
   let response
   try {
@@ -138,7 +153,16 @@ function SectionCard({ title, description, actions, children }) {
   )
 }
 
-function DetailModal({ title, onClose, open = true, headerActions = null, contentRef = null, children }) {
+function DetailModal({
+  title,
+  onClose,
+  open = true,
+  headerActions = null,
+  contentRef = null,
+  panelClassName = '',
+  modalClassName = '',
+  children,
+}) {
   if (!open) return null
   return (
     <div
@@ -150,8 +174,11 @@ function DetailModal({ title, onClose, open = true, headerActions = null, conten
         if (event.key === 'Escape') onClose()
       }}
     >
-      <div className="modal-panel" onClick={(event) => event.stopPropagation()}>
-        <div className="settlement-modal" ref={contentRef}>
+      <div
+        className={['modal-panel', panelClassName].filter(Boolean).join(' ')}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className={['settlement-modal', modalClassName].filter(Boolean).join(' ')} ref={contentRef}>
           <header className="settlement-modal__header">
             <div>
               <h3>{title}</h3>
@@ -202,6 +229,21 @@ export default function BodaApp() {
   const [appData, setAppData] = useState(null)
   const [dashboardData, setDashboardData] = useState(null)
   const [dashboardLoading, setDashboardLoading] = useState(false)
+  const [dashboardStudentListsOpen, setDashboardStudentListsOpen] = useState(false)
+  const [dashboardStudentLists, setDashboardStudentLists] = useState(null)
+  const [dashboardStudentListsLoading, setDashboardStudentListsLoading] = useState(false)
+  const [dashboardInquiryListsOpen, setDashboardInquiryListsOpen] = useState(false)
+  const [dashboardInquiryLists, setDashboardInquiryLists] = useState(null)
+  const [dashboardInquiryListsLoading, setDashboardInquiryListsLoading] = useState(false)
+  const [operationsData, setOperationsData] = useState(null)
+  const [operationsLoading, setOperationsLoading] = useState(false)
+  const [operationsTab, setOperationsTab] = useState('active')
+  const [operationsTeacherFilter, setOperationsTeacherFilter] = useState('all')
+  const [operationsSelectedTeacher, setOperationsSelectedTeacher] = useState('')
+  const [enrollmentHistoryStudent, setEnrollmentHistoryStudent] = useState(null)
+  const [enrollmentHistoryData, setEnrollmentHistoryData] = useState(null)
+  const [enrollmentHistoryLoading, setEnrollmentHistoryLoading] = useState(false)
+  const [enrollmentHistoryError, setEnrollmentHistoryError] = useState('')
   const [paymentSummary, setPaymentSummary] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -283,6 +325,179 @@ export default function BodaApp() {
   }, [selectedPage, selectedMonth])
 
   useEffect(() => {
+    if (selectedPage !== 'operations' || !selectedMonth) return
+    let cancelled = false
+    const load = async () => {
+      setOperationsLoading(true)
+      try {
+        const res = await apiRequest(`/api/operations?month=${encodeURIComponent(selectedMonth)}`)
+        if (!cancelled) setOperationsData(res)
+      } catch (e) {
+        if (!cancelled) {
+          setError(e.message)
+          setOperationsData(null)
+        }
+      } finally {
+        if (!cancelled) setOperationsLoading(false)
+      }
+    }
+    load()
+    return () => {
+      cancelled = true
+    }
+  }, [selectedPage, selectedMonth])
+
+  useEffect(() => {
+    setOperationsTeacherFilter('all')
+    setOperationsSelectedTeacher('')
+  }, [selectedMonth])
+
+  useEffect(() => {
+    if (operationsTab !== 'teachers' || !operationsData) return
+    if (operationsTeacherFilter !== 'all') {
+      setOperationsSelectedTeacher(operationsTeacherFilter)
+    }
+  }, [operationsTab, operationsTeacherFilter, operationsData])
+
+  const operationsTeacherOptions = useMemo(() => {
+    if (!operationsData) return []
+    const names = new Set()
+    const add = (name) => {
+      const text = String(name || '').trim()
+      if (text && text !== '-') names.add(text)
+    }
+    for (const row of operationsData.active_enrollments ?? []) add(row.teacher_name)
+    for (const row of operationsData.trial_lessons ?? []) add(row.teacher_name)
+    for (const row of operationsData.starting_this_month ?? []) add(row.teacher_name)
+    for (const row of operationsData.ending_this_month ?? []) add(row.teacher_name)
+    for (const row of operationsData.teacher_summary ?? []) add(row.teacher_name)
+    return [...names].sort((a, b) => a.localeCompare(b, 'ko'))
+  }, [operationsData])
+
+  useEffect(() => {
+    if (!enrollmentHistoryStudent?.studentId) {
+      setEnrollmentHistoryData(null)
+      setEnrollmentHistoryError('')
+      return undefined
+    }
+    let cancelled = false
+    const load = async () => {
+      setEnrollmentHistoryLoading(true)
+      setEnrollmentHistoryError('')
+      try {
+        const res = await apiRequest(
+          `/api/students/${enrollmentHistoryStudent.studentId}/enrollment-history`,
+        )
+        if (!cancelled) setEnrollmentHistoryData(res)
+      } catch (e) {
+        if (!cancelled) {
+          setEnrollmentHistoryData(null)
+          setEnrollmentHistoryError(e.message || '수업 이력을 불러오지 못했습니다.')
+        }
+      } finally {
+        if (!cancelled) setEnrollmentHistoryLoading(false)
+      }
+    }
+    load()
+    return () => {
+      cancelled = true
+    }
+  }, [enrollmentHistoryStudent])
+
+  const openEnrollmentHistory = (studentId, studentName) => {
+    if (!studentId) return
+    setEnrollmentHistoryStudent({
+      studentId: Number(studentId),
+      studentName: String(studentName || ''),
+    })
+  }
+
+  const renderEnrollmentHistoryAction = (row, nameOverride) => {
+    if (Number(row.student_enrollment_count ?? 0) < 2) return null
+    const studentName = nameOverride ?? row.student_display_name ?? row.student_name ?? ''
+    return (
+      <button
+        type="button"
+        className="link-button student-history-btn"
+        onClick={() => openEnrollmentHistory(row.student_id, studentName)}
+      >
+        이전 이력
+      </button>
+    )
+  }
+
+  const renderEnrollmentHistoryCell = (row, nameOverride) => (
+    <td className="col-enrollment-history">{renderEnrollmentHistoryAction(row, nameOverride) ?? ''}</td>
+  )
+
+  const renderEnrollmentHistoryTable = (items, emptyLabel = '등록된 수업 이력이 없습니다.') => {
+    if (!items?.length) {
+      return <div className="empty-state compact">{emptyLabel}</div>
+    }
+    return (
+      <div className="table-wrap settlement-overview-wrap">
+        <table className="settlement-overview-table operations-table enrollment-history-table">
+          <thead>
+            <tr>
+              <th>선생님</th>
+              <th>상품</th>
+              <th>요일</th>
+              <th>결제</th>
+              <th>수단</th>
+              <th>시범</th>
+              <th>시작</th>
+              <th>종료</th>
+              <th>해지</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((row) => (
+              <tr key={row.enrollment_id}>
+                <td>{row.teacher_name || '-'}</td>
+                <td>{row.product_name || '-'}</td>
+                <td>{row.weekday || '-'}</td>
+                <td>{row.billing_type || '-'}</td>
+                <td>{paymentMethodFilterLabel(row.payment_method) || row.payment_method || '-'}</td>
+                <td>{row.trial_date || '-'}</td>
+                <td>{row.start_date || '-'}</td>
+                <td>{row.end_date || '-'}</td>
+                <td>{row.cancelled_at || '-'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    )
+  }
+
+  const renderEnrollmentHistoryModal = () => {
+    if (!enrollmentHistoryStudent) return null
+    return (
+      <DetailModal
+        title={`${enrollmentHistoryStudent.studentName} · 수업 등록 이력`}
+        panelClassName="modal-panel--inquiry"
+        modalClassName="settlement-modal--inquiry"
+        onClose={() => {
+          setEnrollmentHistoryStudent(null)
+          setEnrollmentHistoryData(null)
+          setEnrollmentHistoryError('')
+        }}
+      >
+        {enrollmentHistoryLoading ? <div className="empty-state compact">불러오는 중...</div> : null}
+        {enrollmentHistoryError ? <div className="banner error">{enrollmentHistoryError}</div> : null}
+        {!enrollmentHistoryLoading && !enrollmentHistoryError ? (
+          <div className="dashboard-student-lists operations-lists">
+            <p className="dashboard-student-lists__hint ops-section-hint">
+              총 {enrollmentHistoryData?.enrollment_count ?? 0}건 · 최신 등록이 위쪽입니다.
+            </p>
+            {renderEnrollmentHistoryTable(enrollmentHistoryData?.items)}
+          </div>
+        ) : null}
+      </DetailModal>
+    )
+  }
+
+  useEffect(() => {
     if ((selectedPage !== 'students' && selectedPage !== 'dashboard') || !selectedMonth) return
     let cancelled = false
     const load = async () => {
@@ -324,14 +539,440 @@ export default function BodaApp() {
       }
     }
     const main = MAIN_NAV_ITEMS.find((item) => item.id === selectedPage)
+    const description =
+      selectedPage === 'operations'
+        ? '수업 중 학생·이번 달 시범·시작·종료를 한 화면에서 확인합니다.'
+        : null
     return {
       eyebrow: '운영',
       title: main?.label ?? '정산 관리',
-      description: null,
+      description,
     }
   }, [selectedPage])
 
   const showMonthToolbar = !isDbPage(selectedPage)
+
+  const openDashboardInquiryLists = async () => {
+    if (!selectedMonth) return
+    setDashboardInquiryListsOpen(true)
+    setDashboardInquiryListsLoading(true)
+    try {
+      const res = await apiRequest(`/api/dashboard/inquiry-lists?month=${encodeURIComponent(selectedMonth)}`)
+      setDashboardInquiryLists(res)
+    } catch (e) {
+      setError(e.message)
+      setDashboardInquiryLists({
+        trial_lessons: [],
+        regular_conversions: [],
+        first_enrollments: [],
+        new_inquiries: [],
+      })
+    } finally {
+      setDashboardInquiryListsLoading(false)
+    }
+  }
+
+  const openDashboardStudentLists = async () => {
+    if (!selectedMonth) return
+    setDashboardStudentListsOpen(true)
+    setDashboardStudentListsLoading(true)
+    try {
+      const res = await apiRequest(`/api/dashboard/student-lists?month=${encodeURIComponent(selectedMonth)}`)
+      setDashboardStudentLists(res)
+    } catch (e) {
+      setError(e.message)
+      setDashboardStudentLists({ new_students: [], ended_students: [], schedule_changes: [] })
+    } finally {
+      setDashboardStudentListsLoading(false)
+    }
+  }
+
+  const renderDashboardScheduleChangeTable = (items, emptyLabel) => {
+    if (!items?.length) {
+      return <div className="empty-state compact">{emptyLabel}</div>
+    }
+    return (
+      <div className="table-wrap settlement-overview-wrap">
+        <table className="settlement-overview-table dashboard-schedule-change-table">
+          <thead>
+            <tr>
+              <th>학생</th>
+              <th>담당 선생님</th>
+              <th>상품</th>
+              <th>요일</th>
+              <th>결제</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((row) => (
+              <tr key={row.student_id}>
+                <td>
+                  <strong>{row.student_name}</strong>
+                  {row.change_type_label ? (
+                    <small className="table-sub">{row.change_type_label}</small>
+                  ) : null}
+                </td>
+                <td>{(row.teachers ?? []).join(', ') || '-'}</td>
+                <td>{row.product_label || row.schedule_label || '-'}</td>
+                <td>{row.weekday_label || '-'}</td>
+                <td>{row.billing_label || '-'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    )
+  }
+
+  const renderDashboardInquiryTrialTable = (items, emptyLabel, { enableEnrollmentHistory = false } = {}) => {
+    if (!items?.length) {
+      return <div className="empty-state compact">{emptyLabel}</div>
+    }
+    return (
+      <div className="table-wrap settlement-overview-wrap">
+        <table className="settlement-overview-table dashboard-inquiry-table">
+          <thead>
+            <tr>
+              <th>학생</th>
+              <th>선생님</th>
+              <th>시범 일정</th>
+              <th>정규 전환</th>
+              <th>정규 수업</th>
+              {enableEnrollmentHistory ? <th className="col-enrollment-history" aria-label="이력" /> : null}
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((row) => (
+              <tr key={`${row.student_id}-${row.enrollment_id}`}>
+                <td>
+                  <strong>{row.student_name}</strong>
+                </td>
+                <td>{row.teacher_name || '-'}</td>
+                <td>{row.trial_schedule || '-'}</td>
+                <td className={row.converted ? 'inquiry-converted-yes' : 'inquiry-converted-no'}>
+                  {row.conversion_label || (row.converted ? '전환' : '미전환')}
+                </td>
+                <td>{row.regular_summary || '-'}</td>
+                {enableEnrollmentHistory ? renderEnrollmentHistoryCell(row) : null}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    )
+  }
+
+  const renderDashboardInquiryConversionTable = (items, emptyLabel) => {
+    if (!items?.length) {
+      return <div className="empty-state compact">{emptyLabel}</div>
+    }
+    return (
+      <div className="table-wrap settlement-overview-wrap">
+        <table className="settlement-overview-table dashboard-inquiry-table">
+          <thead>
+            <tr>
+              <th>학생</th>
+              <th>선생님</th>
+              <th>시범 → 정규 일정</th>
+              <th>상품</th>
+              <th>정규 결제</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((row) => (
+              <tr key={`conv-${row.student_id}`}>
+                <td>
+                  <strong>{row.student_name}</strong>
+                </td>
+                <td>{row.teacher_name || '-'}</td>
+                <td>{row.schedule_label || '-'}</td>
+                <td>{row.product_label || '-'}</td>
+                <td>{row.regular_billing_type || '-'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    )
+  }
+
+  const renderDashboardInquiryFirstEnrollmentTable = (items, emptyLabel) => {
+    if (!items?.length) {
+      return <div className="empty-state compact">{emptyLabel}</div>
+    }
+    return (
+      <div className="table-wrap settlement-overview-wrap">
+        <table className="settlement-overview-table dashboard-inquiry-table">
+          <thead>
+            <tr>
+              <th>학생</th>
+              <th>선생님</th>
+              <th>첫 시작일</th>
+              <th>상품</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((row) => (
+              <tr key={row.student_id}>
+                <td>
+                  <strong>{row.student_name}</strong>
+                </td>
+                <td>{(row.teachers ?? []).join(', ') || '-'}</td>
+                <td>{(row.start_dates ?? []).join(', ') || '-'}</td>
+                <td>{(row.products ?? []).join(', ') || '-'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    )
+  }
+
+  const renderDashboardStudentListTable = (items, emptyLabel) => {
+    if (!items?.length) {
+      return <div className="empty-state compact">{emptyLabel}</div>
+    }
+    return (
+      <div className="table-wrap settlement-overview-wrap">
+        <table className="settlement-overview-table">
+          <thead>
+            <tr>
+              <th>학생</th>
+              <th>담당 선생님</th>
+              <th>상품</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((row) => (
+              <tr key={row.student_id}>
+                <td>
+                  <strong>{row.student_name}</strong>
+                </td>
+                <td>{(row.teachers ?? []).join(', ') || '-'}</td>
+                <td>{(row.products ?? []).join(', ') || '-'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    )
+  }
+
+  const filterOperationsByTeacher = (items, teacherKey = 'teacher_name') => {
+    if (!operationsTeacherFilter || operationsTeacherFilter === 'all') return items ?? []
+    return (items ?? []).filter(
+      (row) => String(row[teacherKey] || '').trim() === operationsTeacherFilter,
+    )
+  }
+
+  const renderOperationsEnrollmentTable = (items, emptyLabel, { hideTeacher = false } = {}) => {
+    const rows = hideTeacher
+      ? (items ?? [])
+      : filterOperationsByTeacher(items)
+    if (!rows.length) {
+      return <div className="empty-state compact">{emptyLabel}</div>
+    }
+    return (
+      <div className="table-wrap settlement-overview-wrap">
+        <table className="settlement-overview-table operations-table">
+          <thead>
+            <tr>
+              <th>학생</th>
+              {!hideTeacher ? <th>선생님</th> : null}
+              <th>상품</th>
+              <th>요일</th>
+              <th>결제</th>
+              <th>수단</th>
+              <th>시작</th>
+              <th>종료</th>
+              <th className="col-enrollment-history" aria-label="이력" />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={`${row.student_id}-${row.enrollment_id}`}>
+                <td>
+                  <strong>{row.student_name}</strong>
+                </td>
+                {!hideTeacher ? <td>{row.teacher_name || '-'}</td> : null}
+                <td>{row.product_name || '-'}</td>
+                <td>{row.weekday || '-'}</td>
+                <td>{row.billing_type || '-'}</td>
+                <td>{paymentMethodFilterLabel(row.payment_method) || row.payment_method || '-'}</td>
+                <td>{row.start_date || '-'}</td>
+                <td>{row.end_date || '-'}</td>
+                {renderEnrollmentHistoryCell(row)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    )
+  }
+
+  const renderOperationsTeacherSplit = (teacherSummary, activeEnrollments, asOfLabel) => {
+    const teacherRows = filterOperationsByTeacher(teacherSummary)
+    if (!teacherRows.length) {
+      return <div className="empty-state compact">집계할 선생님이 없습니다.</div>
+    }
+
+    const selectedName =
+      teacherRows.find((row) => row.teacher_name === operationsSelectedTeacher)?.teacher_name ||
+      teacherRows[0]?.teacher_name
+
+    const studentRows = (activeEnrollments ?? []).filter(
+      (row) => String(row.teacher_name || '').trim() === selectedName,
+    )
+    const selectedMeta = teacherRows.find((row) => row.teacher_name === selectedName)
+
+    return (
+      <div className="ops-teacher-split">
+        <aside className="ops-teacher-split__aside" aria-label="선생님 목록">
+          <p className="ops-teacher-split__aside-title">선생님</p>
+          <ul className="ops-teacher-split__list" role="listbox" aria-label="선생님 선택">
+            {teacherRows.map((row) => {
+              const active = row.teacher_name === selectedName
+              return (
+                <li key={row.teacher_name} role="presentation">
+                  <button
+                    type="button"
+                    role="option"
+                    aria-selected={active}
+                    className={active ? 'ops-teacher-split__item active' : 'ops-teacher-split__item'}
+                    onClick={() => setOperationsSelectedTeacher(row.teacher_name)}
+                  >
+                    <span className="ops-teacher-split__name">{row.teacher_name}</span>
+                    <span className="ops-teacher-split__meta">
+                      {row.student_count ?? 0}명 · {row.enrollment_count ?? 0}건
+                    </span>
+                  </button>
+                </li>
+              )
+            })}
+          </ul>
+        </aside>
+        <div className="ops-teacher-split__detail">
+          <header className="ops-teacher-split__detail-head">
+            <h4 className="ops-teacher-split__detail-title">{selectedName}</h4>
+            <p className="ops-teacher-split__detail-sub">
+              {asOfLabel} 기준 수업 중 · 학생 {selectedMeta?.student_count ?? 0}명 · 등록{' '}
+              {selectedMeta?.enrollment_count ?? 0}건
+            </p>
+          </header>
+          {renderOperationsEnrollmentTable(studentRows, '이 선생님 담당 수업 중 등록이 없습니다.', {
+            hideTeacher: true,
+          })}
+        </div>
+      </div>
+    )
+  }
+
+  const renderOperations = () => {
+    if (operationsLoading) return <div className="empty-state">운영 데이터를 불러오는 중...</div>
+    if (!operationsData) return <div className="empty-state">운영 데이터를 불러오지 못했습니다.</div>
+
+    const asOfLabel = operationsData?.as_of
+      ? String(operationsData.as_of).replace(/-/g, '.')
+      : '-'
+    const monthLabel = formatMonth(operationsData?.billing_month || selectedMonth)
+    const activeCount = filterOperationsByTeacher(operationsData.active_enrollments).length
+    const activeStudentCount = new Set(
+      filterOperationsByTeacher(operationsData.active_enrollments).map((row) => row.student_id),
+    ).size
+
+    const tabCounts = {
+      active: activeCount,
+      trial: filterOperationsByTeacher(operationsData.trial_lessons).length,
+      starting: filterOperationsByTeacher(operationsData.starting_this_month).length,
+      ending: filterOperationsByTeacher(operationsData.ending_this_month).length,
+      teachers: filterOperationsByTeacher(operationsData.teacher_summary).length,
+    }
+
+    let tableContent = null
+    let sectionHint = ''
+    if (operationsTab === 'active') {
+      sectionHint = `${asOfLabel} 기준 수업 중 · 학생 ${activeStudentCount}명 · 등록 ${activeCount}건`
+      tableContent = renderOperationsEnrollmentTable(
+        operationsData.active_enrollments,
+        '수업 중인 등록이 없습니다.',
+      )
+    } else if (operationsTab === 'trial') {
+      sectionHint = `${monthLabel} 시범 진행(trial_date / trial_month)`
+      tableContent = renderDashboardInquiryTrialTable(
+        filterOperationsByTeacher(operationsData.trial_lessons),
+        '이번 달 시범 수업이 없습니다.',
+        { enableEnrollmentHistory: true },
+      )
+    } else if (operationsTab === 'starting') {
+      sectionHint = `${monthLabel}에 수업 시작일이 있는 등록`
+      tableContent = renderOperationsEnrollmentTable(
+        operationsData.starting_this_month,
+        '이번 달 시작 등록이 없습니다.',
+      )
+    } else if (operationsTab === 'ending') {
+      sectionHint = `${monthLabel}에 종료일·해지일이 있는 등록`
+      tableContent = renderOperationsEnrollmentTable(
+        operationsData.ending_this_month,
+        '이번 달 종료 등록이 없습니다.',
+      )
+    } else {
+      sectionHint = '왼쪽에서 선생님을 선택하면 우측에 담당 학생·수업 목록이 표시됩니다.'
+      tableContent = renderOperationsTeacherSplit(
+        operationsData.teacher_summary,
+        operationsData.active_enrollments,
+        asOfLabel,
+      )
+    }
+
+    return (
+      <div className="ops-board">
+        <header className="ops-board__head">
+          <div>
+            <h3 className="ops-board__title">{monthLabel} 운영 스냅샷</h3>
+            <p className="ops-board__sub">
+              기준일 <strong>{asOfLabel}</strong>
+              {operationsTab === 'active' ? ' · 수업 중 학생·등록 수는 이 날짜 기준입니다.' : null}
+            </p>
+          </div>
+          <label className="ops-teacher-filter">
+            <span className="ops-teacher-filter__label">선생님</span>
+            <select
+              className="ops-teacher-filter__select"
+              aria-label="선생님 필터"
+              value={operationsTeacherFilter}
+              onChange={(event) => setOperationsTeacherFilter(event.target.value)}
+            >
+              <option value="all">전체</option>
+              {operationsTeacherOptions.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </label>
+        </header>
+
+        <nav className="ops-tabs" aria-label="운영 목록 구분">
+          {OPERATIONS_TABS.map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              className={operationsTab === tab.id ? 'ops-tabs__item active' : 'ops-tabs__item'}
+              onClick={() => setOperationsTab(tab.id)}
+            >
+              {tab.label}
+              <span className="ops-tabs__count">{tabCounts[tab.id] ?? 0}</span>
+            </button>
+          ))}
+        </nav>
+
+        <SectionCard title={OPERATIONS_TABS.find((t) => t.id === operationsTab)?.label ?? '목록'}>
+          <p className="dashboard-student-lists__hint ops-section-hint">{sectionHint}</p>
+          <div className="dashboard-student-lists operations-lists">{tableContent}</div>
+        </SectionCard>
+      </div>
+    )
+  }
 
   const renderDashboard = () => {
     if (dashboardLoading) return <div className="empty-state">대시보드를 불러오는 중...</div>
@@ -342,12 +983,17 @@ export default function BodaApp() {
       label: formatMonthShort(row.month),
       value: row.gross_revenue,
     }))
+    const inquiryChartData = (dashboardData?.inquiry_trend_6m ?? []).map((row) => ({
+      label: formatMonthShort(row.month),
+      value: row.inquiry_count,
+    }))
     const studentChartData = (dashboardData?.student_trend_6m ?? []).map((row) => ({
       label: formatMonthShort(row.month),
       value: row.student_count,
     }))
-    const momClass =
+    const revenueMomClass =
       summary.revenue_delta > 0 ? 'dash-sub muted-up' : summary.revenue_delta < 0 ? 'dash-sub muted-down' : 'dash-sub'
+    const unpaidClass = (summary.unpaid_count ?? 0) > 0 ? 'kpi-sub-danger' : 'kpi-sub-muted'
 
     return (
       <div className="dash-board">
@@ -361,48 +1007,93 @@ export default function BodaApp() {
           </div>
         </header>
 
-        <div className="dash-kpi">
-          <article className="kpi-card">
+        <div className="dash-kpi dash-kpi--overview-top">
+          <article className="kpi-card kpi-card--hero">
             <span className="kpi-card__label">총매출</span>
             <p className="kpi-card__value">{formatCurrency(summary.gross_revenue)}</p>
-            <ul className="kpi-card__meta">
-              <li>월별 {formatCurrency(summary.monthly_revenue)}</li>
-              <li>회당 {formatCurrency(summary.per_session_revenue)}</li>
-            </ul>
-            <p className={momClass}>{formatMoM(summary.revenue_delta, summary.revenue_delta_rate)}</p>
+            <p className="kpi-card__sub">순매출 {formatCurrency(summary.net_revenue)}</p>
+            <p className={revenueMomClass}>{formatMoM(summary.revenue_delta, summary.revenue_delta_rate)}</p>
           </article>
 
-          <article className="kpi-card">
-            <span className="kpi-card__label">순매출</span>
-            <p className="kpi-card__value">{formatCurrency(summary.net_revenue)}</p>
-            <ul className="kpi-card__meta">
-              <li>선생님 정산 {formatCurrency(summary.teacher_settlement)}</li>
-              <li>시범수업비 {formatCurrency(summary.trial_fee)}</li>
-            </ul>
+          <article
+            className="kpi-card kpi-card--clickable"
+            role="button"
+            tabIndex={0}
+            onClick={openDashboardInquiryLists}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault()
+                openDashboardInquiryLists()
+              }
+            }}
+          >
+            <span className="kpi-card__label">신규 문의</span>
+            <p className="kpi-card__value">
+              {summary.new_inquiry_count}
+              <span className="kpi-card__unit">건</span>
+            </p>
+            <p className="kpi-card__sub">
+              시범 {summary.trial_lesson_count}명 | 신규 {summary.new_first_enrollment_count}명 | 전환{' '}
+              {summary.regular_conversion_count ?? summary.trial_conversion_count ?? 0}명
+            </p>
           </article>
+        </div>
 
-          <article className="kpi-card kpi-card--compact">
+        <div className="dash-kpi dash-kpi--overview-bottom">
+          <article
+            className="kpi-card kpi-card--clickable"
+            role="button"
+            tabIndex={0}
+            onClick={openDashboardStudentLists}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault()
+                openDashboardStudentLists()
+              }
+            }}
+          >
             <span className="kpi-card__label">수강 학생</span>
             <p className="kpi-card__value">
               {summary.active_student_count}
               <span className="kpi-card__unit">명</span>
             </p>
+            <p className="kpi-card__sub">
+              신규 {summary.student_new_count}명 | 탈회 {summary.student_exit_count}명 | 일정변경{' '}
+              {summary.student_schedule_change_count ?? 0}명
+            </p>
+            <p className="dash-sub muted-down">{formatCountMoM(summary.student_delta)}</p>
           </article>
 
-          <article className="kpi-card kpi-card--compact">
-            <span className="kpi-card__label">활성 선생님</span>
+          <article className="kpi-card">
+            <span className="kpi-card__label">수업중인 선생님</span>
             <p className="kpi-card__value">
               {summary.active_teacher_count}
-              <span className="kpi-card__unit">명</span>
+              <span className="kpi-card__unit">명 / {summary.active_teacher_total}</span>
+            </p>
+            <p className="kpi-card__sub">
+              신규 {summary.teacher_new_count}명 | 종료 {summary.teacher_ended_count}명
+            </p>
+            <p className="dash-sub muted-down">{formatCountMoM(summary.teacher_delta)}</p>
+          </article>
+
+          <article className="kpi-card">
+            <span className="kpi-card__label">수납 관리</span>
+            <p className="kpi-card__value">
+              {summary.collection_count}
+              <span className="kpi-card__unit">건</span>
+            </p>
+            <p className="kpi-card__sub">
+              완납 {summary.paid_count}건 |{' '}
+              <span className={unpaidClass}>미납 {summary.unpaid_count}건</span>
             </p>
           </article>
         </div>
 
-        <div className="dash-charts">
+        <div className="dash-charts dash-charts--triple">
           <section className="dash-chart-panel">
             <header>
               <h4>매출 추이</h4>
-              <span>최근 6개월 · 학생 수납 합계</span>
+              <span>최근 6개월</span>
             </header>
             <SimpleBarChart
               data={revenueChartData}
@@ -411,23 +1102,115 @@ export default function BodaApp() {
           </section>
           <section className="dash-chart-panel">
             <header>
-              <h4>학생 수 추이</h4>
-              <span>최근 6개월 · 수납 학생 수</span>
+              <h4>신규 문의 추이</h4>
+              <span>최근 6개월 · 신규 학생 유저 등록</span>
             </header>
-            <SimpleBarChart data={studentChartData} unit="명" barColor="#475569" />
+            <SimpleBarChart data={inquiryChartData} unit="건" barColor="#6366f1" />
           </section>
           <section className="dash-chart-panel">
             <header>
-              <h4>결제 수단 분포</h4>
-              <span>
-                {paymentSummary?.billing_month
-                  ? `${formatMonth(paymentSummary.billing_month)} 수납 기준`
-                  : '조회 월 수납 기준'}
-              </span>
+              <h4>학생 수 추이</h4>
+              <span>최근 6개월</span>
             </header>
-            <SimpleDonutChart data={paymentDonutData} formatLabel={(label) => label} />
+            <SimpleBarChart data={studentChartData} unit="명" barColor="#475569" />
           </section>
         </div>
+
+        {dashboardInquiryListsOpen ? (
+          <DetailModal
+            title={`${formatMonth(summary.billing_month)} 신규 문의 상세`}
+            panelClassName="modal-panel--inquiry"
+            modalClassName="settlement-modal--inquiry"
+            onClose={() => {
+              setDashboardInquiryListsOpen(false)
+              setDashboardInquiryLists(null)
+            }}
+          >
+            {dashboardInquiryListsLoading ? (
+              <div className="empty-state compact">불러오는 중...</div>
+            ) : (
+              <div className="dashboard-student-lists dashboard-inquiry-lists">
+                <section>
+                  <h4>시범 수업 ({dashboardInquiryLists?.trial_lessons?.length ?? 0}건)</h4>
+                  <p className="dashboard-student-lists__hint">해당 월 시범 진행(trial_date / trial_month)</p>
+                  {renderDashboardInquiryTrialTable(
+                    dashboardInquiryLists?.trial_lessons,
+                    '시범 수업이 없습니다.',
+                  )}
+                </section>
+                <section>
+                  <h4>
+                    정규 전환 ({dashboardInquiryLists?.regular_conversions?.length ?? 0}명)
+                  </h4>
+                  <p className="dashboard-student-lists__hint">
+                    이달 시범 후 같은 달 정규 수업(start_date)을 시작한 학생
+                  </p>
+                  {renderDashboardInquiryConversionTable(
+                    dashboardInquiryLists?.regular_conversions,
+                    '정규 전환 학생이 없습니다.',
+                  )}
+                </section>
+                <section>
+                  <h4>
+                    첫 수업 등록 ({dashboardInquiryLists?.first_enrollments?.length ?? 0}명)
+                  </h4>
+                  <p className="dashboard-student-lists__hint">생애 첫 수업 시작일이 해당 월인 학생</p>
+                  {renderDashboardInquiryFirstEnrollmentTable(
+                    dashboardInquiryLists?.first_enrollments,
+                    '첫 수업 등록 학생이 없습니다.',
+                  )}
+                </section>
+              </div>
+            )}
+          </DetailModal>
+        ) : null}
+
+        {dashboardStudentListsOpen ? (
+          <DetailModal
+            title={`${formatMonth(summary.billing_month)} 수강 학생 변동`}
+            onClose={() => {
+              setDashboardStudentListsOpen(false)
+              setDashboardStudentLists(null)
+            }}
+          >
+            {dashboardStudentListsLoading ? (
+              <div className="empty-state compact">불러오는 중...</div>
+            ) : (
+              <div className="dashboard-student-lists">
+                <section>
+                  <h4>신규 학생 ({dashboardStudentLists?.new_students?.length ?? 0}명)</h4>
+                  <p className="dashboard-student-lists__hint">
+                    해당 월에 수업을 시작한 학생(일정 변경 제외)
+                  </p>
+                  {renderDashboardStudentListTable(
+                    dashboardStudentLists?.new_students,
+                    '신규 학생이 없습니다.',
+                  )}
+                </section>
+                <section>
+                  <h4>
+                    일정 변경 학생 ({dashboardStudentLists?.schedule_changes?.length ?? 0}명)
+                  </h4>
+                  <p className="dashboard-student-lists__hint">
+                    이전 수업 종료 후 같은 달(또는 직전 월 종료)에 새 수업이 시작된 경우
+                  </p>
+                  {renderDashboardScheduleChangeTable(
+                    dashboardStudentLists?.schedule_changes,
+                    '일정 변경 학생이 없습니다.',
+                  )}
+                </section>
+                <section>
+                  <h4>탈회 학생 ({dashboardStudentLists?.ended_students?.length ?? 0}명)</h4>
+                  <p className="dashboard-student-lists__hint">해당 월에 수업 종료일이 있는 학생</p>
+                  {renderDashboardStudentListTable(
+                    dashboardStudentLists?.ended_students,
+                    '탈회 학생이 없습니다.',
+                  )}
+                </section>
+              </div>
+            )}
+          </DetailModal>
+        ) : null}
       </div>
     )
   }
@@ -438,7 +1221,6 @@ export default function BodaApp() {
   const [teacherNotice, setTeacherNotice] = useState('')
   const [teacherSearch, setTeacherSearch] = useState('')
   const [teacherEmailSending, setTeacherEmailSending] = useState(false)
-  const [teacherEmailPreviewing, setTeacherEmailPreviewing] = useState(false)
   const [teacherEmailModalOpen, setTeacherEmailModalOpen] = useState(false)
   const [teacherEmailSelection, setTeacherEmailSelection] = useState({})
   const [settlementEmailStatus, setSettlementEmailStatus] = useState({
@@ -546,20 +1328,6 @@ export default function BodaApp() {
       requestAnimationFrame(() => requestAnimationFrame(resolve))
     })
 
-  const resolveSettlementTestTeacher = () => {
-    if (selectedTeacherIds.length > 0) {
-      const row = teacherEmailRows.find((item) => item.teacher_id === selectedTeacherIds[0])
-      if (row) {
-        return { teacher_id: row.teacher_id, teacher_name: row.teacher_name }
-      }
-    }
-    const fallback = (teacherAggregated ?? []).find((row) => row.teacher_name === '서재현')
-    if (fallback) {
-      return { teacher_id: fallback.teacher_id, teacher_name: fallback.teacher_name }
-    }
-    return null
-  }
-
   const captureTeacherSummaryPngBase64 = async (teacherId, billingMonth, teacherName) => {
     setTeacherNotice(`요약 이미지 준비 중… ${teacherName ?? ''}`)
     const detail = await apiRequest(
@@ -579,77 +1347,6 @@ export default function BodaApp() {
     })
     setEmailCaptureDetail(null)
     return canvas.toDataURL('image/png').split(',')[1]
-  }
-
-  const downloadTeacherSummaryPreview = async () => {
-    const target = resolveSettlementTestTeacher()
-    if (!target) {
-      setTeacherError('미리볼 선생님을 찾을 수 없습니다. 메일 모달에서 선택하거나 서재현 데이터가 필요합니다.')
-      return
-    }
-    setTeacherEmailPreviewing(true)
-    setTeacherError('')
-    try {
-      const pngBase64 = await captureTeacherSummaryPngBase64(
-        target.teacher_id,
-        selectedMonth,
-        target.teacher_name,
-      )
-      const anchor = document.createElement('a')
-      anchor.href = `data:image/png;base64,${pngBase64}`
-      const safeName = `${target.teacher_name}_${formatMonth(selectedMonth)}`.replace(/[\\/:*?"<>|]/g, '_')
-      anchor.download = `정산요약_${safeName}.png`
-      anchor.click()
-      setTeacherNotice(`${target.teacher_name} 요약 이미지를 저장했습니다.`)
-    } catch (e) {
-      setTeacherError(e.message || '요약 이미지 저장에 실패했습니다.')
-    } finally {
-      setTeacherEmailPreviewing(false)
-    }
-  }
-
-  const sendSettlementTestEmail = async () => {
-    const target = resolveSettlementTestTeacher()
-    const testEmail = settlementEmailStatus?.test_email ?? SETTLEMENT_TEST_EMAIL
-    if (!target) {
-      setTeacherError('테스트할 선생님을 찾을 수 없습니다.')
-      return
-    }
-    if (
-      !window.confirm(
-        `${target.teacher_name} 선생님 ${formatMonth(selectedMonth)} 요약 PNG를\n${testEmail} 로 테스트 발송할까요?`,
-      )
-    ) {
-      return
-    }
-    setTeacherEmailSending(true)
-    setTeacherError('')
-    setTeacherNotice('')
-    try {
-      const pngBase64 = await captureTeacherSummaryPngBase64(
-        target.teacher_id,
-        selectedMonth,
-        target.teacher_name,
-      )
-      setTeacherNotice('테스트 메일 발송 중…')
-      const res = await apiRequest('/api/teachers/settlements/send-email/test', {
-        method: 'POST',
-        body: JSON.stringify({
-          billing_month: selectedMonth,
-          teacher_id: target.teacher_id,
-          png_base64: pngBase64,
-          to_email: testEmail,
-        }),
-      })
-      setTeacherNotice(
-        `테스트 메일 발송 완료: ${res.teacher_name} → ${res.to_email} (${formatCurrency(res.net_amount ?? 0)})`,
-      )
-    } catch (e) {
-      setEmailCaptureDetail(null)
-      setTeacherError(e.message || '테스트 메일 발송에 실패했습니다.')
-    } finally {
-      setTeacherEmailSending(false)
-    }
   }
 
   const buildTeacherEmailAttachments = async (teacherIds, billingMonth) => {
@@ -691,9 +1388,7 @@ export default function BodaApp() {
             </label>
             <button
               type="button"
-              className="secondary-button icon-only-button"
-              aria-label="정산 리스트 이미지 저장"
-              title="정산 리스트 이미지 저장"
+              className="secondary-button"
               disabled={teacherListExporting || teacherLoading || filteredTeacherRows.length === 0}
               onClick={async () => {
                 if (!teacherListCaptureRef.current) return
@@ -714,25 +1409,7 @@ export default function BodaApp() {
                 }
               }}
             >
-              {teacherListExporting ? '…' : '🖼️'}
-            </button>
-            <button
-              type="button"
-              className="secondary-button"
-              disabled={teacherEmailPreviewing || teacherLoading || !selectedMonth}
-              title="요약 PNG 저장 (선택 1명 또는 서재현)"
-              onClick={() => downloadTeacherSummaryPreview()}
-            >
-              {teacherEmailPreviewing ? '저장 중...' : '요약 미리보기'}
-            </button>
-            <button
-              type="button"
-              className="secondary-button"
-              disabled={teacherEmailSending || teacherLoading || !selectedMonth}
-              title={`테스트 수신: ${settlementEmailStatus?.test_email ?? SETTLEMENT_TEST_EMAIL}`}
-              onClick={() => sendSettlementTestEmail()}
-            >
-              {teacherEmailSending ? '발송 중...' : '테스트 메일'}
+              {teacherListExporting ? '저장 중...' : '이미지 저장'}
             </button>
             <button
               type="button"
@@ -761,7 +1438,7 @@ export default function BodaApp() {
         {settlementEmailStatus && !settlementEmailStatus.smtp_ready ? (
           <div className="banner error">
             SMTP가 설정되지 않았습니다. 터미널에서{' '}
-            <code>정산앱/backend/start-smtp.sh</code> 로 백엔드를 실행한 뒤 테스트 메일을 보내세요.
+            <code>정산앱/backend/start-smtp.sh</code> 로 백엔드를 실행한 뒤 메일을 발송하세요.
           </div>
         ) : null}
         {(rateAdjustments?.notice_count ?? 0) > 0 ? (
@@ -961,22 +1638,6 @@ export default function BodaApp() {
             <div className="teacher-email-modal-actions">
             <button
               type="button"
-              className="secondary-button"
-              disabled={teacherEmailPreviewing || teacherEmailSending}
-              onClick={() => downloadTeacherSummaryPreview()}
-            >
-              {teacherEmailPreviewing ? '저장 중...' : '요약 미리보기'}
-            </button>
-            <button
-              type="button"
-              className="secondary-button"
-              disabled={teacherEmailSending}
-              onClick={() => sendSettlementTestEmail()}
-            >
-              {teacherEmailSending ? '발송 중...' : '테스트 메일'}
-            </button>
-            <button
-              type="button"
               className="primary-button"
               disabled={teacherEmailSending || selectedTeacherIds.length === 0}
               onClick={async () => {
@@ -1033,9 +1694,8 @@ export default function BodaApp() {
           }
         >
           <p className="teacher-email-send__hint">
-            테스트 메일은 <strong>{settlementEmailStatus?.test_email ?? SETTLEMENT_TEST_EMAIL}</strong> 로만
-            발송됩니다. 요약 미리보기·테스트는 선택한 첫 번째 선생님 기준이며, 선택이 없으면 서재현 선생님
-            데이터를 사용합니다.
+            선택한 선생님에게 <strong>{formatMonth(selectedMonth)}</strong> 정산 요약 이미지(PNG)가 첨부되어
+            발송됩니다. 이메일 주소가 없는 선생님은 건너뜁니다.
           </p>
           <div className="teacher-email-send">
             <div className="teacher-email-send__toolbar">
@@ -1414,6 +2074,7 @@ export default function BodaApp() {
                       <th>결제수단</th>
                       <th>{formatMonth(selectedMonth)} 수납</th>
                       <th>수납상태</th>
+                      <th className="col-enrollment-history" aria-label="이력" />
                       <th>상세</th>
                     </tr>
                   </thead>
@@ -1454,6 +2115,10 @@ export default function BodaApp() {
                             미납 처리
                           </button>
                         </td>
+                        {renderEnrollmentHistoryCell(
+                          student,
+                          student.student_display_name ?? student.student_name,
+                        )}
                         <td>
                           <button
                             type="button"
@@ -1467,7 +2132,7 @@ export default function BodaApp() {
                     ))}
                     {studentCollectionSummary.paidRows.length === 0 ? (
                       <tr>
-                        <td colSpan={8} className="students-table-empty">
+                        <td colSpan={9} className="students-table-empty">
                           해당 조건의 수납 완료 학생이 없습니다.
                         </td>
                       </tr>
@@ -1495,6 +2160,7 @@ export default function BodaApp() {
                       <th>결제수단</th>
                       <th>{formatMonth(selectedMonth)} 수납</th>
                       <th>수납상태</th>
+                      <th className="col-enrollment-history" aria-label="이력" />
                       <th>상세</th>
                     </tr>
                   </thead>
@@ -1541,6 +2207,10 @@ export default function BodaApp() {
                             수납 완료
                           </button>
                         </td>
+                        {renderEnrollmentHistoryCell(
+                          student,
+                          student.student_display_name ?? student.student_name,
+                        )}
                         <td>
                           <button
                             type="button"
@@ -1554,7 +2224,7 @@ export default function BodaApp() {
                     ))}
                     {studentCollectionSummary.unpaidRows.length === 0 ? (
                       <tr>
-                        <td colSpan={8} className="students-table-empty">
+                        <td colSpan={9} className="students-table-empty">
                           미납/예정 학생이 없습니다.
                         </td>
                       </tr>
@@ -1616,6 +2286,18 @@ export default function BodaApp() {
                   </p>
                 </article>
               </div>
+
+              {Number(studentDetail.enrollment_count ?? 0) >= 2 ? (
+                <section className="student-detail-block">
+                  <div className="student-detail-block__header">
+                    <h4>수업 등록 이력</h4>
+                    <span>총 {studentDetail.enrollment_count}건</span>
+                  </div>
+                  {renderEnrollmentHistoryTable(
+                    studentDetail.enrollment_history ?? studentDetail.enrollments,
+                  )}
+                </section>
+              ) : null}
 
               <section className="student-detail-block">
                 <div className="student-detail-block__header">
@@ -1806,6 +2488,8 @@ export default function BodaApp() {
     switch (selectedPage) {
       case 'dashboard':
         return renderDashboard()
+      case 'operations':
+        return renderOperations()
       case 'teacher-settlements':
         return renderTeacherSettlements()
       case 'students':
@@ -1941,6 +2625,7 @@ export default function BodaApp() {
           </section>
         </div>
       </main>
+      {renderEnrollmentHistoryModal()}
     </div>
   )
 }

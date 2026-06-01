@@ -1342,14 +1342,18 @@ select {
   align-items: center;
   min-height: 240px;
   padding: 24px;
-  border: 1px dashed #cbd5e1;
+  border: none;
+  outline: none;
   border-radius: 20px;
   color: #64748b;
   background: #f8fafc;
+  box-shadow: none;
 }
 
 .empty-state.compact {
-  min-height: 120px;
+  min-height: 72px;
+  padding: 16px 12px;
+  border-radius: 14px;
 }
 
 .table-wrap {
@@ -1677,10 +1681,25 @@ tbody tr:hover td {
 }
 
 .modal-panel {
-  width: min(1120px, 100%);
+  width: min(1120px, calc(100vw - 40px));
+  max-width: 100%;
   background: #fff;
   border-radius: 16px;
   box-shadow: 0 24px 60px rgba(15, 23, 42, 0.18);
+  box-sizing: border-box;
+}
+
+.modal-panel--inquiry {
+  width: min(920px, calc(100vw - 32px));
+}
+
+.settlement-modal--inquiry {
+  padding: 20px 22px 28px;
+}
+
+.settlement-modal--inquiry .settlement-modal__body {
+  overflow-x: visible;
+  min-width: 0;
 }
 
 .settlement-modal {
@@ -4133,6 +4152,16 @@ tbody tr:hover td {
   font-weight: 700;
 }
 
+.kpi-sub-muted {
+  color: #94a3b8;
+  font-weight: 600;
+}
+
+.kpi-card__sub--accent {
+  color: #2563eb;
+  font-weight: 700;
+}
+
 .dash-sub.muted-up {
   color: #dc2626;
 }
@@ -4155,10 +4184,201 @@ tbody tr:hover td {
   grid-column: 1 / 2;
 }
 
+.dash-charts--triple {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+/* 3번째 차트: 2행 왼쪽 1칸만 (오른쪽은 공백) */
+.dash-charts--triple .dash-chart-panel:nth-child(3) {
+  grid-column: 1;
+}
+
+.dashboard-student-lists {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.dashboard-inquiry-lists .dashboard-inquiry-table thead th,
+.dashboard-inquiry-lists .dashboard-inquiry-table tbody td {
+  text-align: center;
+  vertical-align: middle;
+  white-space: nowrap;
+  word-break: keep-all;
+  overflow-wrap: normal;
+}
+
+/* 전역 마지막 열 92px 고정이 정규 수업 열을 잘라냄 */
+.dashboard-inquiry-lists .dashboard-inquiry-table th:last-child,
+.dashboard-inquiry-lists .dashboard-inquiry-table td:last-child {
+  width: auto;
+  min-width: 160px;
+  max-width: none;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.dashboard-inquiry-lists .dashboard-inquiry-table th:nth-child(1),
+.dashboard-inquiry-lists .dashboard-inquiry-table td:nth-child(1) {
+  width: 14%;
+  min-width: 72px;
+}
+
+.dashboard-inquiry-lists .dashboard-inquiry-table th:nth-child(2),
+.dashboard-inquiry-lists .dashboard-inquiry-table td:nth-child(2) {
+  width: 16%;
+  min-width: 80px;
+}
+
+.dashboard-inquiry-lists .dashboard-inquiry-table th:nth-child(3),
+.dashboard-inquiry-lists .dashboard-inquiry-table td:nth-child(3) {
+  width: 22%;
+  min-width: 110px;
+}
+
+.dashboard-inquiry-lists .dashboard-inquiry-table th:nth-child(4),
+.dashboard-inquiry-lists .dashboard-inquiry-table td:nth-child(4) {
+  width: 12%;
+  min-width: 72px;
+}
+
+.dashboard-inquiry-lists .dashboard-inquiry-table th:nth-child(5),
+.dashboard-inquiry-lists .dashboard-inquiry-table td:nth-child(5) {
+  width: auto;
+  min-width: 180px;
+}
+
+.dashboard-inquiry-lists .settlement-overview-wrap {
+  overflow-x: auto;
+  max-width: 100%;
+  -webkit-overflow-scrolling: touch;
+}
+
+.inquiry-converted-yes {
+  color: #2563eb;
+  font-weight: 700;
+}
+
+.inquiry-converted-no {
+  color: #94a3b8;
+  font-weight: 600;
+}
+
+.dashboard-student-lists h4 {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.dashboard-student-lists__hint {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.dashboard-student-lists:not(.dashboard-inquiry-lists) .settlement-overview-wrap {
+  overflow-x: visible;
+}
+
+.dashboard-student-lists .settlement-overview-table {
+  table-layout: auto;
+  width: 100%;
+}
+
+.dashboard-student-lists
+  .settlement-overview-table:not(.dashboard-inquiry-table):not(.operations-table)
+  thead
+  th,
+.dashboard-student-lists
+  .settlement-overview-table:not(.dashboard-inquiry-table):not(.operations-table)
+  tbody
+  td {
+  white-space: normal;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+  text-align: center;
+  vertical-align: middle;
+  line-height: 1.45;
+}
+
+.dashboard-student-lists .settlement-overview-table .table-sub {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #94a3b8;
+  font-weight: 500;
+}
+
+.dashboard-student-lists
+  .settlement-overview-table:not(.dashboard-schedule-change-table):not(.dashboard-inquiry-table):not(
+    .operations-table
+  )
+  th:nth-child(1),
+.dashboard-student-lists
+  .settlement-overview-table:not(.dashboard-schedule-change-table):not(.dashboard-inquiry-table):not(
+    .operations-table
+  )
+  td:nth-child(1) {
+  width: 22%;
+  min-width: 88px;
+}
+
+.dashboard-student-lists
+  .settlement-overview-table:not(.dashboard-schedule-change-table):not(.dashboard-inquiry-table):not(
+    .operations-table
+  )
+  th:nth-child(2),
+.dashboard-student-lists
+  .settlement-overview-table:not(.dashboard-schedule-change-table):not(.dashboard-inquiry-table):not(
+    .operations-table
+  )
+  td:nth-child(2) {
+  width: 28%;
+  min-width: 96px;
+}
+
+.dashboard-student-lists
+  .settlement-overview-table:not(.dashboard-schedule-change-table):not(.dashboard-inquiry-table):not(
+    .operations-table
+  )
+  th:nth-child(3),
+.dashboard-student-lists
+  .settlement-overview-table:not(.dashboard-schedule-change-table):not(.dashboard-inquiry-table):not(
+    .operations-table
+  )
+  td:nth-child(3) {
+  width: 50%;
+  min-width: 200px;
+}
+
+.dashboard-schedule-change-table th:nth-child(3),
+.dashboard-schedule-change-table td:nth-child(3) {
+  min-width: 160px;
+}
+
+.dashboard-schedule-change-table th:nth-child(4),
+.dashboard-schedule-change-table td:nth-child(4) {
+  min-width: 100px;
+}
+
+.dashboard-schedule-change-table th:nth-child(5),
+.dashboard-schedule-change-table td:nth-child(5) {
+  min-width: 88px;
+}
+
+.dashboard-schedule-change-table tbody td {
+  font-weight: 600;
+  color: #0f172a;
+}
+
 @media (max-width: 900px) {
   .dash-charts {
     grid-template-columns: 1fr;
   }
+
+  .dash-charts--triple {
+    grid-template-columns: 1fr;
+  }
+
 
   .dash-charts--bottom .dash-chart-panel {
     grid-column: auto;
@@ -4197,6 +4417,17 @@ tbody tr:hover td {
   text-align: center;
   color: #94a3b8;
   font-size: 13px;
+  border: none;
+  outline: none;
+  border-radius: 14px;
+  background: #f8fafc;
+  box-shadow: none;
+}
+
+/* 데이터 없음: 패널 fill 유지, stroke(테두리)만 제거 */
+.dash-board .dash-chart-panel:has(.chart-empty) {
+  border: none !important;
+  box-shadow: none !important;
 }
 
 /* 막대 차트 */
@@ -4962,4 +5193,325 @@ body,
   font-size: 12px;
   overflow: auto;
   color: #334155;
+}
+
+/* 운영 관리 */
+.ops-board {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.ops-board__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px 20px;
+}
+
+.ops-board__title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: #0f172a;
+  letter-spacing: -0.02em;
+}
+
+.ops-board__sub {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: #64748b;
+}
+
+.ops-teacher-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 0 1 220px;
+  min-width: 160px;
+  max-width: 280px;
+}
+
+.ops-teacher-filter__label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #64748b;
+}
+
+.ops-teacher-filter__select {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  font-size: 14px;
+  background: #fff;
+  color: #0f172a;
+}
+
+.ops-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ops-tabs__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border: 1px solid #e2e8f0;
+  border-radius: 999px;
+  background: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  color: #475569;
+  cursor: pointer;
+}
+
+.ops-tabs__item.active {
+  border-color: #0f172a;
+  background: #0f172a;
+  color: #fff;
+}
+
+.ops-tabs__count {
+  display: inline-flex;
+  min-width: 1.5rem;
+  justify-content: center;
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  background: rgba(15, 23, 42, 0.08);
+}
+
+.ops-tabs__item.active .ops-tabs__count {
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
+}
+
+.operations-lists {
+  width: 100%;
+}
+
+.operations-lists .table-wrap,
+.operations-lists .settlement-overview-wrap {
+  width: 100%;
+  max-width: none;
+  margin-left: 0;
+  margin-right: 0;
+}
+
+.operations-lists .empty-state.compact {
+  margin-left: 0;
+  margin-right: 0;
+}
+
+.operations-lists .operations-table {
+  table-layout: auto;
+  width: 100%;
+  min-width: 0;
+}
+
+.operations-lists .operations-table th,
+.operations-lists .operations-table td {
+  width: auto;
+  max-width: none;
+  text-align: center;
+  vertical-align: middle;
+  padding: 6px 10px !important;
+  font-size: 13px;
+  line-height: 1.35;
+  white-space: nowrap;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+
+.operations-lists .operations-table th:last-child,
+.operations-lists .operations-table td:last-child {
+  width: auto;
+  min-width: 60px;
+}
+
+.operations-lists .table-wrap thead th,
+.operations-lists .table-wrap tbody td,
+.operations-lists .table-wrap tfoot td,
+.operations-lists .dashboard-inquiry-table th,
+.operations-lists .dashboard-inquiry-table td {
+  text-align: center;
+  vertical-align: middle;
+  padding: 6px 10px !important;
+  font-size: 13px;
+  line-height: 1.35;
+  white-space: nowrap;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+
+.operations-lists .operations-table tbody td strong,
+.operations-lists .dashboard-inquiry-table tbody td strong {
+  font-weight: 600;
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.operations-lists .settlement-overview-table thead th {
+  padding-top: 8px;
+  padding-bottom: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.operations-lists .dashboard-inquiry-table td:last-child {
+  white-space: normal;
+  max-width: 240px;
+  line-height: 1.35;
+}
+
+.ops-section-hint {
+  text-align: center;
+  margin-bottom: 10px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.col-enrollment-history {
+  width: 60px;
+  min-width: 60px;
+  max-width: 60px;
+  padding-left: 8px !important;
+  padding-right: 8px !important;
+  text-align: center;
+  vertical-align: middle;
+}
+
+.student-history-btn.link-button {
+  border: none;
+  border-radius: 0;
+  background: none !important;
+  background-color: transparent !important;
+  box-shadow: none;
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  padding: 0;
+  text-align: center;
+}
+
+.student-history-btn.link-button:hover {
+  background: none !important;
+  background-color: transparent !important;
+  text-decoration: underline;
+}
+
+.enrollment-history-table th,
+.enrollment-history-table td {
+  white-space: nowrap;
+}
+
+.ops-teacher-split {
+  display: grid;
+  grid-template-columns: minmax(200px, 240px) minmax(0, 1fr);
+  gap: 14px;
+  width: 100%;
+  align-items: start;
+}
+
+.ops-teacher-split__aside {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.ops-teacher-split__aside-title {
+  margin: 0;
+  padding: 10px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #64748b;
+  background: #f8fafc;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.ops-teacher-split__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: min(520px, 60vh);
+  overflow-y: auto;
+}
+
+.ops-teacher-split__item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  width: 100%;
+  padding: 10px 12px;
+  border: none;
+  border-bottom: 1px solid #f1f5f9;
+  background: #fff;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s ease;
+}
+
+.ops-teacher-split__item:last-child {
+  border-bottom: none;
+}
+
+.ops-teacher-split__item:hover {
+  background: #f8fafc;
+}
+
+.ops-teacher-split__item.active {
+  background: #eff6ff;
+}
+
+.ops-teacher-split__name {
+  font-size: 14px;
+  font-weight: 700;
+  color: #0f172a;
+  line-height: 1.3;
+}
+
+.ops-teacher-split__meta {
+  font-size: 12px;
+  color: #64748b;
+  line-height: 1.3;
+}
+
+.ops-teacher-split__detail {
+  min-width: 0;
+}
+
+.ops-teacher-split__detail-head {
+  margin-bottom: 10px;
+}
+
+.ops-teacher-split__detail-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.ops-teacher-split__detail-sub {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #64748b;
+}
+
+@media (max-width: 800px) {
+  .ops-teacher-split {
+    grid-template-columns: 1fr;
+  }
+
+  .ops-teacher-split__list {
+    max-height: 200px;
+  }
 }

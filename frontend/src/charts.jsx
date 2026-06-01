@@ -50,6 +50,16 @@ function defaultFormatValue(value) {
   return Number(value).toLocaleString('ko-KR')
 }
 
+function hasPositiveValues(data, valueKey = 'value') {
+  return (data ?? []).some((row) => Number(row[valueKey]) > 0)
+}
+
+function hasPositiveStackTotals(data, stacks) {
+  return (data ?? []).some((row) =>
+    stacks.some((stack) => Number(row[stack.key]) > 0),
+  )
+}
+
 /** 월별 추이 — 세로 막대 (가독성 우선) */
 export function SimpleBarChart({
   data,
@@ -59,7 +69,7 @@ export function SimpleBarChart({
   unit = '',
   barColor = BAR_COLOR,
 }) {
-  if (!data?.length) {
+  if (!data?.length || !hasPositiveValues(data, valueKey)) {
     return <div className="chart-empty">표시할 데이터가 없습니다.</div>
   }
 
@@ -129,14 +139,11 @@ export function SimpleBarChart({
 
 /** 결제 수단 — SVG 도넛 (conic-gradient 미사용) */
 export function SimpleDonutChart({ data, valueKey = 'value', labelKey = 'label', formatLabel }) {
-  if (!data?.length) {
+  if (!data?.length || !hasPositiveValues(data, valueKey)) {
     return <div className="chart-empty">표시할 데이터가 없습니다.</div>
   }
 
   const total = data.reduce((sum, row) => sum + (Number(row[valueKey]) || 0), 0)
-  if (total <= 0) {
-    return <div className="chart-empty">표시할 데이터가 없습니다.</div>
-  }
 
   const cx = 90
   const cy = 90
@@ -212,7 +219,7 @@ export function SimpleStackedBarChart({
   ],
   formatValue,
 }) {
-  if (!data?.length) {
+  if (!data?.length || !hasPositiveStackTotals(data, stacks)) {
     return <div className="chart-empty">표시할 데이터가 없습니다.</div>
   }
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import date
 import base64
@@ -12,7 +13,7 @@ from typing import Any, Optional
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlalchemy import func, text
+from sqlalchemy import func, or_, text
 from sqlalchemy.orm import Session, aliased
 
 from .database import Base, engine, get_db
@@ -30,7 +31,7 @@ from .db_schema_migrate import apply_table_renames
 from .billing_sync import sync_all_trial_enrollments
 from .enrollment_billing import resolve_next_billing, sync_all_next_billing
 from .settlement_detail import build_teacher_settlement_detail
-from .payment_pricing import refresh_all_per_session_payment_amounts
+from .payment_pricing import enrollment_lesson_weekdays, refresh_all_per_session_payment_amounts
 from .session_carryover import (
     ensure_may_june_2026_carryovers,
     sync_carryovers_from_per_session_gaps,
@@ -490,17 +491,455 @@ def _trial_count_for_month(db: Session, billing_month: str) -> int:
     return sum(1 for (trial_date,) in rows if _normalize_month(trial_date) == billing_month)
 
 
-def _new_first_payment_student_count(db: Session, billing_month: str) -> int:
-    student_first_month: dict[int, str] = {}
-    rows = db.query(MonthlyPaymentRecord.student_id, MonthlyPaymentRecord.billing_month).all()
-    for student_id, month in rows:
-        if student_id is None or not month:
+_PYTHON_WEEKDAY_LABELS = ("월", "화", "수", "목", "금", "토", "일")
+
+
+def _weekday_text_for_enrollment(enrollment: LessonEnrollment) -> str:
+    days = enrollment_lesson_weekdays(enrollment)
+    if not days:
+        return "-"
+    return ", ".join(_PYTHON_WEEKDAY_LABELS[d] for d in days if 0 <= d < 7)
+
+
+def _billing_type_label(enrollment: LessonEnrollment, product_billing_unit: Optional[str]) -> str:
+    if str(enrollment.price_type or "").strip() == "per_session":
+        return "회차별"
+    unit = str(product_billing_unit or "").strip()
+    if unit == "per_session":
+        return "회차별"
+    return "월별"
+
+
+def _change_arrow_label(old_value: str, new_value: str) -> str:
+    old_text = str(old_value or "-").strip() or "-"
+    new_text = str(new_value or "-").strip() or "-"
+    if old_text == new_text:
+        return old_text
+    return f"{old_text} → {new_text}"
+
+
+def _schedule_change_items(db: Session, billing_month: str) -> list[dict[str, Any]]:
+    """
+    이전 수업 종료 후 해당 월에 새 수업이 시작된 경우(일정 변경).
+    직전 월 또는 같은 달에 종료된 수업 → 이번 달 시작 수업으로 짝을 맞춥니다.
+    """
+    prev_month = _month_add(billing_month, -1)
+    student_user = aliased(User)
+    teacher_user = aliased(User)
+
+    starters = (
+        db.query(LessonEnrollment)
+        .filter(func.substr(func.coalesce(LessonEnrollment.start_date, ""), 1, 7) == billing_month)
+        .all()
+    )
+    if not starters:
+        return []
+
+    student_ids = sorted({int(e.student_id) for e in starters if e.student_id is not None})
+    detail_rows = (
+        db.query(
+            LessonEnrollment,
+            student_user.name,
+            teacher_user.name,
+            Product.name,
+            Product.billing_unit,
+        )
+        .join(StudentProfile, StudentProfile.id == LessonEnrollment.student_id)
+        .join(student_user, student_user.id == StudentProfile.user_id)
+        .outerjoin(TeacherProfile, TeacherProfile.id == LessonEnrollment.teacher_id)
+        .outerjoin(teacher_user, teacher_user.id == TeacherProfile.user_id)
+        .outerjoin(Product, Product.id == LessonEnrollment.product_id)
+        .filter(LessonEnrollment.student_id.in_(student_ids))
+        .all()
+    )
+    by_student: dict[int, list[tuple[LessonEnrollment, str, str, str, str]]] = defaultdict(list)
+    student_names: dict[int, str] = {}
+    for enrollment, student_name, teacher_name, product_name, product_billing_unit in detail_rows:
+        sid = int(enrollment.student_id)
+        student_names[sid] = str(student_name or "")
+        by_student[sid].append(
+            (
+                enrollment,
+                str(student_name or ""),
+                str(teacher_name or ""),
+                str(product_name or ""),
+                str(product_billing_unit or ""),
+            )
+        )
+
+    items: list[dict[str, Any]] = []
+    seen_students: set[int] = set()
+    for new_enrollment in starters:
+        sid = int(new_enrollment.student_id or 0)
+        if not sid or sid in seen_students:
+            continue
+        new_start = _parse_date_only(new_enrollment.start_date)
+        if not new_start:
+            continue
+
+        new_product = ""
+        new_teacher = ""
+        new_product_billing_unit = ""
+        for enrollment, _sname, tname, pname, unit in by_student.get(sid, []):
+            if enrollment.id == new_enrollment.id:
+                new_product = pname
+                new_teacher = tname
+                new_product_billing_unit = unit
+                break
+
+        old_candidates: list[tuple[LessonEnrollment, str, str, str, date]] = []
+        for enrollment, _sname, _tname, pname, unit in by_student.get(sid, []):
+            if enrollment.id == new_enrollment.id:
+                continue
+            end_raw = enrollment.end_date or enrollment.cancelled_at
+            end_date = _parse_date_only(end_raw)
+            if not end_date or end_date >= new_start:
+                continue
+            end_month = _normalize_month(end_raw)
+            if end_month not in (billing_month, prev_month):
+                continue
+            old_candidates.append((enrollment, pname, _tname, unit, end_date))
+
+        if not old_candidates:
+            continue
+
+        old_enrollment, old_product, old_teacher, old_product_billing_unit, _old_end = max(
+            old_candidates, key=lambda row: row[4]
+        )
+        old_end_raw = old_enrollment.end_date or old_enrollment.cancelled_at
+        old_weekday = _weekday_text_for_enrollment(old_enrollment)
+        new_weekday = _weekday_text_for_enrollment(new_enrollment)
+        old_billing = _billing_type_label(old_enrollment, old_product_billing_unit)
+        new_billing = _billing_type_label(new_enrollment, new_product_billing_unit)
+
+        product_label = _change_arrow_label(old_product or "-", new_product or "-")
+        weekday_label = _change_arrow_label(old_weekday, new_weekday)
+        billing_label = _change_arrow_label(old_billing, new_billing)
+        schedule_label = product_label
+
+        change_types: list[str] = []
+        if (old_product or "-") != (new_product or "-"):
+            change_types.append("상품")
+        if old_weekday != new_weekday and not (old_weekday == "-" and new_weekday == "-"):
+            change_types.append("요일")
+        if old_billing != new_billing:
+            change_types.append("결제")
+
+        teachers = []
+        for name in (old_teacher, new_teacher):
+            if name and name not in teachers:
+                teachers.append(name)
+
+        items.append(
+            {
+                "student_id": sid,
+                "student_name": student_names.get(sid, ""),
+                "teachers": teachers,
+                "old_product": old_product,
+                "new_product": new_product,
+                "schedule_label": schedule_label,
+                "product_label": product_label,
+                "old_weekday": old_weekday,
+                "new_weekday": new_weekday,
+                "weekday_label": weekday_label,
+                "old_billing_type": old_billing,
+                "new_billing_type": new_billing,
+                "billing_label": billing_label,
+                "change_types": change_types,
+                "change_type_label": " · ".join(change_types) if change_types else "일정",
+                "old_end_date": old_end_raw,
+                "new_start_date": new_enrollment.start_date,
+            }
+        )
+        seen_students.add(sid)
+
+    return sorted(items, key=lambda row: (row["student_name"], row["student_id"]))
+
+
+def _schedule_change_student_ids(db: Session, billing_month: str) -> set[int]:
+    return {int(item["student_id"]) for item in _schedule_change_items(db, billing_month)}
+
+
+def _schedule_change_exit_excluded_ids(db: Session, billing_month: str) -> set[int]:
+    """일정 변경으로 종료된 달의 탈회 이중 집계 방지(익월 시작 짝)."""
+    excluded: set[int] = set()
+    next_month = _month_add(billing_month, 1)
+    if next_month:
+        for item in _schedule_change_items(db, next_month):
+            if _normalize_month(item.get("old_end_date")) == billing_month:
+                excluded.add(int(item["student_id"]))
+    return excluded
+
+
+def _student_new_by_start_count(db: Session, billing_month: str) -> int:
+    """해당 월에 수업 시작일이 있고, 일정 변경이 아닌 순수 신규 학생 수."""
+    rows = db.query(LessonEnrollment.student_id, LessonEnrollment.start_date).all()
+    new_students: set[int] = set()
+    for student_id, start_date in rows:
+        if student_id is None:
+            continue
+        if _normalize_month(start_date) == billing_month:
+            new_students.add(int(student_id))
+    schedule_ids = _schedule_change_student_ids(db, billing_month)
+    return len(new_students - schedule_ids)
+
+
+def _first_enrollment_student_count(db: Session, billing_month: str) -> int:
+    """생애 첫 수업 등록(가장 이른 start_date)이 해당 월인 학생 수."""
+    first_start_by_student: dict[int, str] = {}
+    rows = db.query(LessonEnrollment.student_id, LessonEnrollment.start_date).all()
+    for student_id, start_date in rows:
+        if student_id is None or not start_date:
+            continue
+        month = _normalize_month(start_date)
+        if not month:
             continue
         sid = int(student_id)
-        current = student_first_month.get(sid)
-        if current is None or str(month) < current:
-            student_first_month[sid] = str(month)
-    return sum(1 for month in student_first_month.values() if month == billing_month)
+        current = first_start_by_student.get(sid)
+        if current is None or month < current:
+            first_start_by_student[sid] = month
+    return sum(1 for month in first_start_by_student.values() if month == billing_month)
+
+
+def _trial_student_ids_for_month(db: Session, billing_month: str) -> set[int]:
+    rows = db.query(LessonEnrollment.student_id, LessonEnrollment.trial_date).all()
+    trial_students: set[int] = set()
+    for student_id, trial_date in rows:
+        if student_id is None:
+            continue
+        if _normalize_month(trial_date) == billing_month:
+            trial_students.add(int(student_id))
+    return trial_students
+
+
+def _trial_schedule_label(enrollment: LessonEnrollment) -> str:
+    trial_date = str(enrollment.trial_date or "").strip()
+    weekday = _weekday_text_for_enrollment(enrollment)
+    if trial_date and weekday != "-":
+        return f"{trial_date} ({weekday})"
+    if trial_date:
+        return trial_date
+    trial_month = str(enrollment.trial_month or "").strip()
+    return trial_month or "-"
+
+
+def _regular_start_enrollment_for_month(
+    db: Session,
+    student_id: int,
+    billing_month: str,
+) -> Optional[LessonEnrollment]:
+    rows = (
+        db.query(LessonEnrollment)
+        .filter(LessonEnrollment.student_id == int(student_id))
+        .all()
+    )
+    candidates = [
+        row
+        for row in rows
+        if row.start_date and _normalize_month(row.start_date) == billing_month
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda row: int(row.id or 0))
+
+
+def _dashboard_inquiry_lists(db: Session, billing_month: str) -> dict[str, Any]:
+    """시범 수업·정규 전환·첫 수업 등록 상세."""
+    student_user = aliased(User)
+    teacher_user = aliased(User)
+
+    trial_rows = (
+        db.query(
+            LessonEnrollment,
+            student_user.name,
+            teacher_user.name,
+            Product.name,
+            Product.billing_unit,
+        )
+        .join(StudentProfile, StudentProfile.id == LessonEnrollment.student_id)
+        .join(student_user, student_user.id == StudentProfile.user_id)
+        .outerjoin(TeacherProfile, TeacherProfile.id == LessonEnrollment.teacher_id)
+        .outerjoin(teacher_user, teacher_user.id == TeacherProfile.user_id)
+        .outerjoin(Product, Product.id == LessonEnrollment.product_id)
+        .filter(
+            or_(
+                func.substr(func.coalesce(LessonEnrollment.trial_date, ""), 1, 7) == billing_month,
+                LessonEnrollment.trial_month == billing_month,
+            )
+        )
+        .order_by(LessonEnrollment.trial_date.asc(), student_user.name.asc(), LessonEnrollment.id.asc())
+        .all()
+    )
+
+    trial_lessons: list[dict[str, Any]] = []
+    regular_conversions: list[dict[str, Any]] = []
+    seen_trial_students: set[int] = set()
+
+    for enrollment, student_name, teacher_name, product_name, product_billing_unit in trial_rows:
+        sid = int(enrollment.student_id or 0)
+        if not sid:
+            continue
+        regular_enrollment = _regular_start_enrollment_for_month(db, sid, billing_month)
+        converted = regular_enrollment is not None
+        regular_product = ""
+        regular_start = ""
+        regular_billing = ""
+        regular_weekday = ""
+        if regular_enrollment:
+            regular_product = (
+                db.query(Product.name).filter(Product.id == regular_enrollment.product_id).scalar() or ""
+            )
+            regular_start = str(regular_enrollment.start_date or "")
+            regular_billing = _billing_type_label(
+                regular_enrollment,
+                db.query(Product.billing_unit)
+                .filter(Product.id == regular_enrollment.product_id)
+                .scalar(),
+            )
+            regular_weekday = _weekday_text_for_enrollment(regular_enrollment)
+
+        item = {
+            "enrollment_id": int(enrollment.id),
+            "student_id": sid,
+            "student_name": str(student_name or ""),
+            "teacher_name": str(teacher_name or ""),
+            "product_name": str(product_name or ""),
+            "trial_date": str(enrollment.trial_date or ""),
+            "trial_month": str(enrollment.trial_month or ""),
+            "trial_schedule": _trial_schedule_label(enrollment),
+            "trial_weekday": _weekday_text_for_enrollment(enrollment),
+            "trial_fee": _safe_int(enrollment.trial_fee),
+            "converted": converted,
+            "conversion_label": "전환" if converted else "미전환",
+            "regular_start_date": regular_start,
+            "regular_product_name": str(regular_product or ""),
+            "regular_weekday": regular_weekday,
+            "regular_billing_type": regular_billing,
+            "regular_summary": (
+                f"{regular_product or '-'} · {regular_start or '-'} · {regular_billing or '-'}"
+                if converted
+                else "-"
+            ),
+        }
+        trial_lessons.append(item)
+        if converted and sid not in seen_trial_students:
+            seen_trial_students.add(sid)
+            regular_conversions.append(
+                {
+                    **item,
+                    "schedule_label": _change_arrow_label(
+                        item["trial_schedule"],
+                        f"{regular_start} ({regular_weekday})"
+                        if regular_weekday != "-"
+                        else regular_start,
+                    ),
+                    "product_label": _change_arrow_label(
+                        str(product_name or "-"),
+                        str(regular_product or "-"),
+                    ),
+                }
+            )
+
+    first_start_by_student: dict[int, str] = {}
+    for student_id, start_date in db.query(LessonEnrollment.student_id, LessonEnrollment.start_date).all():
+        if student_id is None or not start_date:
+            continue
+        month = _normalize_month(start_date)
+        if not month:
+            continue
+        sid = int(student_id)
+        current = first_start_by_student.get(sid)
+        if current is None or month < current:
+            first_start_by_student[sid] = month
+
+    first_ids = [sid for sid, month in first_start_by_student.items() if month == billing_month]
+    first_enrollments: list[dict[str, Any]] = []
+    if first_ids:
+        first_rows = (
+            db.query(
+                StudentProfile.id,
+                student_user.name,
+                teacher_user.name,
+                Product.name,
+                LessonEnrollment.start_date,
+            )
+            .join(student_user, student_user.id == StudentProfile.user_id)
+            .join(
+                LessonEnrollment,
+                (LessonEnrollment.student_id == StudentProfile.id)
+                & (func.substr(func.coalesce(LessonEnrollment.start_date, ""), 1, 7) == billing_month),
+            )
+            .outerjoin(TeacherProfile, TeacherProfile.id == LessonEnrollment.teacher_id)
+            .outerjoin(teacher_user, teacher_user.id == TeacherProfile.user_id)
+            .outerjoin(Product, Product.id == LessonEnrollment.product_id)
+            .filter(StudentProfile.id.in_(first_ids))
+            .order_by(student_user.name.asc(), LessonEnrollment.id.asc())
+            .all()
+        )
+        first_map: dict[int, dict[str, Any]] = {}
+        for student_id, student_name, teacher_name, product_name, start_date in first_rows:
+            sid = int(student_id)
+            if sid not in first_start_by_student or first_start_by_student[sid] != billing_month:
+                continue
+            row = first_map.get(sid)
+            if not row:
+                row = {
+                    "student_id": sid,
+                    "student_name": student_name,
+                    "teachers": [],
+                    "products": [],
+                    "start_dates": [],
+                }
+                first_map[sid] = row
+            if teacher_name and teacher_name not in row["teachers"]:
+                row["teachers"].append(teacher_name)
+            if product_name and product_name not in row["products"]:
+                row["products"].append(product_name)
+            if start_date and start_date not in row["start_dates"]:
+                row["start_dates"].append(start_date)
+        first_enrollments = sorted(first_map.values(), key=lambda x: (x["student_name"], x["student_id"]))
+
+    new_user_rows = (
+        db.query(StudentProfile.id, student_user.name, student_user.created_at)
+        .join(student_user, student_user.id == StudentProfile.user_id)
+        .filter(func.substr(func.coalesce(student_user.created_at, ""), 1, 7) == billing_month)
+        .order_by(student_user.name.asc(), StudentProfile.id.asc())
+        .all()
+    )
+    new_inquiries = [
+        {
+            "student_id": int(student_id),
+            "student_name": str(student_name or ""),
+            "registered_at": str(created_at or ""),
+        }
+        for student_id, student_name, created_at in new_user_rows
+    ]
+
+    return {
+        "billing_month": billing_month,
+        "trial_lessons": trial_lessons,
+        "regular_conversions": regular_conversions,
+        "first_enrollments": first_enrollments,
+        "new_inquiries": new_inquiries,
+    }
+
+
+def _trial_conversion_count(db: Session, billing_month: str) -> int:
+    """이달 시범 진행 학생 중, 같은 달에 정규 수업(start_date)을 시작한 학생 수."""
+    trial_students = _trial_student_ids_for_month(db, billing_month)
+    if not trial_students:
+        return 0
+    converted = 0
+    rows = db.query(LessonEnrollment.student_id, LessonEnrollment.start_date).filter(
+        LessonEnrollment.student_id.in_(list(trial_students))
+    ).all()
+    started: set[int] = set()
+    for student_id, start_date in rows:
+        if student_id is None:
+            continue
+        if _normalize_month(start_date) == billing_month:
+            started.add(int(student_id))
+    return len(started)
 
 
 def _student_exit_count(db: Session, billing_month: str) -> int:
@@ -511,22 +950,35 @@ def _student_exit_count(db: Session, billing_month: str) -> int:
             continue
         if _normalize_month(end_date) == billing_month:
             exited_students.add(int(student_id))
-    return len(exited_students)
+    excluded = _schedule_change_exit_excluded_ids(db, billing_month)
+    return len(exited_students - excluded)
+
+
+def _teacher_new_count_for_month(db: Session, billing_month: str) -> int:
+    rows = (
+        db.query(User.created_at)
+        .join(TeacherProfile, TeacherProfile.user_id == User.id)
+        .all()
+    )
+    return sum(1 for (created_at,) in rows if _normalize_month(created_at) == billing_month)
 
 
 def _dashboard_student_lists(db: Session, billing_month: str) -> dict[str, Any]:
     student_user = aliased(User)
     teacher_user = aliased(User)
-    payment_rows = db.query(MonthlyPaymentRecord.student_id, MonthlyPaymentRecord.billing_month).all()
-    first_month_by_student: dict[int, str] = {}
-    for student_id, month in payment_rows:
-        if student_id is None or not month:
+    schedule_changes = _schedule_change_items(db, billing_month)
+    schedule_change_ids = {int(item["student_id"]) for item in schedule_changes}
+    exit_excluded_ids = _schedule_change_exit_excluded_ids(db, billing_month)
+
+    new_ids: set[int] = set()
+    for student_id, start_date in db.query(LessonEnrollment.student_id, LessonEnrollment.start_date).all():
+        if student_id is None:
             continue
-        sid = int(student_id)
-        current = first_month_by_student.get(sid)
-        if current is None or str(month) < current:
-            first_month_by_student[sid] = str(month)
-    new_ids = [sid for sid, first_month in first_month_by_student.items() if first_month == billing_month]
+        if _normalize_month(start_date) == billing_month:
+            sid = int(student_id)
+            if sid not in schedule_change_ids:
+                new_ids.add(sid)
+    new_ids = sorted(new_ids)
     new_items: list[dict[str, Any]] = []
     if new_ids:
         new_detail_rows = (
@@ -543,6 +995,7 @@ def _dashboard_student_lists(db: Session, billing_month: str) -> dict[str, Any]:
             .outerjoin(teacher_user, teacher_user.id == TeacherProfile.user_id)
             .outerjoin(Product, Product.id == LessonEnrollment.product_id)
             .filter(StudentProfile.id.in_(new_ids))
+            .filter(func.substr(func.coalesce(LessonEnrollment.start_date, ""), 1, 7) == billing_month)
             .order_by(student_user.name.asc(), StudentProfile.id.asc(), LessonEnrollment.id.asc())
             .all()
         )
@@ -570,7 +1023,9 @@ def _dashboard_student_lists(db: Session, billing_month: str) -> dict[str, Any]:
         if student_id is None:
             continue
         if _normalize_month(end_date) == billing_month:
-            ended_ids.add(int(student_id))
+            sid = int(student_id)
+            if sid not in exit_excluded_ids:
+                ended_ids.add(sid)
     ended_items: list[dict[str, Any]] = []
     if ended_ids:
         ended_detail_rows = (
@@ -613,6 +1068,7 @@ def _dashboard_student_lists(db: Session, billing_month: str) -> dict[str, Any]:
         "billing_month": billing_month,
         "new_students": new_items,
         "ended_students": ended_items,
+        "schedule_changes": schedule_changes,
     }
 
 
@@ -707,12 +1163,20 @@ def _build_dashboard_for_month(db: Session, billing_month: str) -> dict[str, Any
     prev_active = _active_counts(db, prev_month) if prev_month else {"active_student_count": 0, "active_teacher_count": 0}
     student_created = _student_user_created_count(db, billing_month)
     trial_count = _trial_count_for_month(db, billing_month)
-    first_payment_new = _new_first_payment_student_count(db, billing_month)
+    first_enrollment_new = _first_enrollment_student_count(db, billing_month)
+    schedule_changes = _schedule_change_items(db, billing_month)
+    student_schedule_change_count = len(schedule_changes)
+    student_new_by_start = _student_new_by_start_count(db, billing_month)
+    trial_conversion = _trial_conversion_count(db, billing_month)
+    conversion_rate = (
+        round((trial_conversion / trial_count) * 100, 1) if trial_count > 0 else None
+    )
     prev_student_created = _student_user_created_count(db, prev_month) if prev_month else 0
     inquiry_delta = student_created - prev_student_created
     student_exit = _student_exit_count(db, billing_month)
     student_delta = active["active_student_count"] - _safe_int(prev_active.get("active_student_count"))
     active_teacher_total = _active_teacher_profile_count(db)
+    teacher_new = _teacher_new_count_for_month(db, billing_month)
     teacher_ended = _teacher_ended_count_for_month(db, billing_month)
     teacher_delta = active["active_teacher_count"] - _safe_int(prev_active.get("active_teacher_count"))
     payment_counts = _payment_status_counts(db, billing_month)
@@ -735,11 +1199,16 @@ def _build_dashboard_for_month(db: Session, billing_month: str) -> dict[str, Any
         "revenue_delta": revenue_delta,
         "revenue_delta_rate": revenue_delta_rate,
         "new_inquiry_count": student_created,
-        "new_first_payment_count": first_payment_new,
+        "new_first_enrollment_count": first_enrollment_new,
         "trial_lesson_count": trial_count,
+        "trial_conversion_count": trial_conversion,
+        "regular_conversion_count": trial_conversion,
+        "regular_conversion_rate": conversion_rate,
         "inquiry_delta": inquiry_delta,
-        "student_new_count": first_payment_new,
+        "student_new_count": student_new_by_start,
+        "student_schedule_change_count": student_schedule_change_count,
         "student_exit_count": student_exit,
+        "teacher_new_count": teacher_new,
         "student_delta": student_delta,
         "teacher_delta": teacher_delta,
         "paid_count": payment_counts["paid_count"],
@@ -981,8 +1450,55 @@ def dashboard_student_lists(month: Optional[str] = None, db: Session = Depends(g
     if not month:
         month = months[0] if months else None
     if not month:
-        return {"billing_month": None, "active_students": [], "new_students": [], "ended_students": []}
+        return {
+            "billing_month": None,
+            "active_students": [],
+            "new_students": [],
+            "ended_students": [],
+            "schedule_changes": [],
+        }
     return _dashboard_student_lists(db, month)
+
+
+@app.get("/api/operations")
+def operations_overview(month: Optional[str] = None, db: Session = Depends(get_db)):
+    """운영 관리 — 수업 중·시범·월별 시작·종료."""
+    from .operations import build_operations_overview
+
+    months = [
+        row[0]
+        for row in db.query(MonthlyPaymentRecord.billing_month)
+        .distinct()
+        .order_by(MonthlyPaymentRecord.billing_month.desc())
+        .all()
+        if row[0]
+    ]
+    if not month:
+        month = months[0] if months else date.today().strftime("%Y-%m")
+    return build_operations_overview(db, month)
+
+
+@app.get("/api/dashboard/inquiry-lists")
+def dashboard_inquiry_lists(month: Optional[str] = None, db: Session = Depends(get_db)):
+    months = [
+        row[0]
+        for row in db.query(MonthlyPaymentRecord.billing_month)
+        .distinct()
+        .order_by(MonthlyPaymentRecord.billing_month.desc())
+        .all()
+        if row[0]
+    ]
+    if not month:
+        month = months[0] if months else None
+    if not month:
+        return {
+            "billing_month": None,
+            "trial_lessons": [],
+            "regular_conversions": [],
+            "first_enrollments": [],
+            "new_inquiries": [],
+        }
+    return _dashboard_inquiry_lists(db, month)
 
 
 @app.get("/api/students/payment-summary")
@@ -2092,7 +2608,74 @@ def list_students_by_month(db: Session, month: Optional[str] = None) -> dict[str
         if "payment_status" not in item:
             item["payment_status"] = "unpaid" if "unpaid" in item.get("payment_statuses", []) else "paid"
 
+    enrollment_counts = {
+        int(sid): int(cnt)
+        for sid, cnt in db.query(LessonEnrollment.student_id, func.count(LessonEnrollment.id))
+        .group_by(LessonEnrollment.student_id)
+        .all()
+        if sid is not None
+    }
+    for item in items:
+        sid = int(item.get("student_id") or 0)
+        item["student_enrollment_count"] = enrollment_counts.get(sid, 0)
+
     return {"billing_month": month, "items": items}
+
+
+def _student_enrollment_history_items(
+    db: Session, student_id: int
+) -> tuple[Optional[str], list[dict[str, Any]]]:
+    """학생의 전체 수업 등록(lesson_enrollments) 이력."""
+    student_row = (
+        db.query(StudentProfile, User.name)
+        .join(User, User.id == StudentProfile.user_id)
+        .filter(StudentProfile.id == student_id)
+        .first()
+    )
+    if not student_row:
+        return None, []
+    _, student_name = student_row
+
+    rows = (
+        db.query(LessonEnrollment, Product.name, Product.billing_unit, User.name)
+        .outerjoin(Product, Product.id == LessonEnrollment.product_id)
+        .outerjoin(TeacherProfile, TeacherProfile.id == LessonEnrollment.teacher_id)
+        .outerjoin(User, User.id == TeacherProfile.user_id)
+        .filter(LessonEnrollment.student_id == student_id)
+        .order_by(LessonEnrollment.id.desc())
+        .all()
+    )
+    items: list[dict[str, Any]] = []
+    for sub, product_name, billing_unit, teacher_name in rows:
+        items.append(
+            {
+                "enrollment_id": int(sub.id),
+                "teacher_name": str(teacher_name or "-"),
+                "product_name": str(product_name or "-"),
+                "start_date": str(sub.start_date or "") or "-",
+                "end_date": str(sub.end_date or "") or "-",
+                "cancelled_at": str(sub.cancelled_at or "") or "-",
+                "trial_date": str(sub.trial_date or "") or "-",
+                "weekday": _weekday_text_for_enrollment(sub),
+                "billing_type": _billing_type_label(sub, billing_unit),
+                "payment_method": str(sub.payment_method or "") or "-",
+            }
+        )
+    return str(student_name or ""), items
+
+
+@app.get("/api/students/{student_id}/enrollment-history")
+def student_enrollment_history(student_id: int, db: Session = Depends(get_db)):
+    """동일 학생의 수업 등록 전체 이력 (2건 이상일 때 UI에서 사용)."""
+    student_name, items = _student_enrollment_history_items(db, student_id)
+    if student_name is None:
+        raise HTTPException(status_code=404, detail="학생을 찾을 수 없습니다.")
+    return {
+        "student_id": student_id,
+        "student_name": student_name,
+        "enrollment_count": len(items),
+        "items": items,
+    }
 
 
 @app.get("/api/students/{student_id}")
@@ -2247,6 +2830,8 @@ def student_detail(student_id: int, month: Optional[str] = None, db: Session = D
         for r in refund_rows
     ]
 
+    _, enrollment_history = _student_enrollment_history_items(db, student_id)
+
     return {
         "student_id": student_id,
         "student_name": student_name,
@@ -2256,6 +2841,8 @@ def student_detail(student_id: int, month: Optional[str] = None, db: Session = D
         "parent_name": student.parent_name,
         "parent_phone": student.parent_phone,
         "enrollments": [e for e in enrollment_items if (not month or e.get("is_valid_for_month"))],
+        "enrollment_history": enrollment_history,
+        "enrollment_count": len(enrollment_history),
         "month_payments": month_payment_items,
         "payment_history": history_items,
         "refund_requests": refund_items,
