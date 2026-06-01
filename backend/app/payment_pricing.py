@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import calendar
+import re
 from dataclasses import dataclass
 from datetime import date
 from typing import Optional
@@ -16,6 +17,14 @@ from .models import LessonEnrollment, MonthlyPaymentRecord, Product
 _ENROLL_DAY_TO_PYTHON_WEEKDAY = {0: 6, 1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5}
 
 AUTO_PRICING_TAGS = frozenset({"unpaid", "regular", "first_month", ""})
+
+# price_35(할인가) 적용 학생 — 그 외 기본 price_17
+PRICE_35_STUDENT_KEYS = ("원준우", "원찬우", "최다은", "최하은", "김선우")
+
+
+def is_price_35_student_name(name: str) -> bool:
+    compact = re.sub(r"\s+", "", str(name or ""))
+    return any(key in compact for key in PRICE_35_STUDENT_KEYS)
 
 
 @dataclass(frozen=True)
@@ -52,7 +61,7 @@ def resolve_price_type(enrollment: LessonEnrollment, product: Optional[Product])
         return price_type
     if product and str(product.billing_unit or "").strip() == "per_session":
         return "per_session"
-    return "price_35"
+    return "price_17"
 
 
 def find_per_session_product_variant(db: Session, product: Product) -> Optional[Product]:
@@ -98,7 +107,31 @@ def monthly_list_price(product: Product, price_type: str) -> int:
         return int(product.price_17 or product.price_standard or 0)
     if price_type == "price_35":
         return int(product.price_35 or product.price_standard or 0)
-    return int(product.price_standard or product.price_35 or product.price_17 or 0)
+    return int(product.price_17 or product.price_standard or 0)
+
+
+def monthly_amount_for_enrollment(
+    db: Session,
+    enrollment: LessonEnrollment,
+    product: Optional[Product],
+    billing_month: str,
+    *,
+    sheet_amount: Optional[int] = None,
+    charge_label: Optional[str] = None,
+) -> int:
+    """시트·수납 반영용 월별 금액 — 수업 price_type 우선(첫달은 일할 규칙)."""
+    if str(charge_label or "").strip() == "첫달결제":
+        if enrollment.first_month_amount:
+            return int(enrollment.first_month_amount)
+        quote = quote_payment_for_month(db, enrollment, product, billing_month)
+        if quote and quote.billing_unit == "monthly":
+            return int(quote.base_amount)
+        return int(sheet_amount or 0)
+
+    price_type = resolve_price_type(enrollment, product)
+    if product:
+        return monthly_list_price(product, price_type)
+    return int(sheet_amount or 0)
 
 
 def per_session_unit_price(product: Product) -> int:
@@ -259,19 +292,39 @@ def per_session_scheduled_collection_amount(row: MonthlyPaymentRecord) -> int:
     return int(row.base_amount or row.final_amount or 0)
 
 
-def per_session_teacher_settlement_gross(row: MonthlyPaymentRecord) -> int:
-    """선생님 당월 정산: 실제 진행 회차만."""
-    if has_special_amount(row):
-        return int(row.special_amount or 0)
+def effective_per_session_settlement_sessions(
+    row: MonthlyPaymentRecord,
+    *,
+    carryover_out_sessions: int = 0,
+) -> int:
+    """선생님 당월 정산 회차: 예정 − 익월 이월(미진행)분."""
     total = int(row.total_sessions or 0)
+    out_sessions = max(0, int(carryover_out_sessions or 0))
+    if total > 0 and out_sessions > 0:
+        return max(0, total - out_sessions)
     completed = int(row.completed_sessions or 0)
     if total > 0:
-        completed = max(0, min(completed, total))
-    elif completed <= 0:
-        completed = total
+        if completed > 0:
+            return max(0, min(completed, total))
+        return total
+    return max(0, completed)
+
+
+def per_session_teacher_settlement_gross(
+    row: MonthlyPaymentRecord,
+    *,
+    carryover_out_sessions: int = 0,
+) -> int:
+    """선생님 당월 정산: 실제 진행 회차만 (익월 이월 회차 제외)."""
+    if has_special_amount(row):
+        return int(row.special_amount or 0)
     unit = per_session_unit_price_from_row(row)
-    if unit > 0 and completed > 0:
-        return unit * completed
+    sessions = effective_per_session_settlement_sessions(
+        row,
+        carryover_out_sessions=carryover_out_sessions,
+    )
+    if unit > 0 and sessions > 0:
+        return unit * sessions
     return int(row.final_amount or 0)
 
 

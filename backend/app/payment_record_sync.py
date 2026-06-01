@@ -136,7 +136,8 @@ def _get_or_create_monthly_row(
         before = (existing.student_id, existing.teacher_id, existing.billing_unit, existing.commission_rate)
         existing.student_id = enrollment.student_id
         existing.teacher_id = enrollment.teacher_id
-        if not existing.billing_unit:
+        # 수업 price_type 변경 등으로 billing_unit이 바뀔 수 있어, 기존 행도 동기화합니다.
+        if not existing.billing_unit or str(existing.billing_unit).strip() != str(unit).strip():
             existing.billing_unit = unit
         if existing.commission_rate is None:
             existing.commission_rate = rate

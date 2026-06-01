@@ -1,41 +1,48 @@
-export default function TeacherSettlementDetailBody({ detail, formatCurrency }) {
+export default function TeacherSettlementDetailBody({ detail, formatCurrency, variant = 'full' }) {
   if (!detail) return null
 
+  const summaryOnly = variant === 'summary'
   const monthlyRows = detail.regular_monthly_payments ?? []
   const perSessionRows = detail.regular_per_session_payments ?? []
   const trialRows = detail.trial_lessons ?? []
 
+  const payoutSummary = detail.payout_flow ? (
+    <>
+      <section className="teacher-payout-total teacher-payout-total--plain">
+        <div className="teacher-payout-total__main">
+          <span>최종 정산 금액</span>
+          <strong>{formatCurrency(detail.payout_flow.total?.net_amount)}</strong>
+          <p className="teacher-payout-total__hint">
+            세전 {formatCurrency(detail.payout_flow.total?.pre_tax_amount)}
+          </p>
+        </div>
+      </section>
+
+      <div className="teacher-payout-summary-row">
+        <section className="teacher-payout-summary-card">
+          <span>정규 수업료 (세전)</span>
+          <strong>{formatCurrency(detail.payout_flow.regular?.teacher_share_pre_tax)}</strong>
+        </section>
+        <section className="teacher-payout-summary-card">
+          <span>시범 수업료 (세전)</span>
+          <strong>{formatCurrency(detail.payout_flow.trial?.teacher_share_pre_tax)}</strong>
+        </section>
+      </div>
+    </>
+  ) : null
+
   return (
-    <div className="teacher-detail-modal">
-      {detail.payout_flow ? (
-        <>
-          <section className="teacher-payout-total teacher-payout-total--plain">
-            <div className="teacher-payout-total__main">
-              <span>최종 정산 금액</span>
-              <strong>{formatCurrency(detail.payout_flow.total?.net_amount)}</strong>
-              <p className="teacher-payout-total__hint">
-                세전 {formatCurrency(detail.payout_flow.total?.pre_tax_amount)}
-              </p>
-            </div>
-          </section>
+    <div className={`teacher-detail-modal${summaryOnly ? ' teacher-detail-modal--summary-only' : ''}`}>
+      {payoutSummary}
 
-          <div className="teacher-payout-summary-row">
-            <section className="teacher-payout-summary-card">
-              <span>정규 수업료 (세전)</span>
-              <strong>{formatCurrency(detail.payout_flow.regular?.teacher_share_pre_tax)}</strong>
-            </section>
-            <section className="teacher-payout-summary-card">
-              <span>시범 수업료 (세전)</span>
-              <strong>{formatCurrency(detail.payout_flow.trial?.teacher_share_pre_tax)}</strong>
-            </section>
-          </div>
-        </>
-      ) : null}
-
-      <section className="teacher-detail-block teacher-detail-block--flat">
+      {summaryOnly ? null : (
+      <>
+      <section className="teacher-detail-block teacher-detail-block--flat teacher-detail-block--monthly">
         <div className="teacher-detail-block__header">
-          <h4>월별 수업</h4>
-          <span>{monthlyRows.length}건</span>
+          <div className="teacher-detail-block__title">
+            <h4>월별 수업</h4>
+            <span className="teacher-detail-block__count">{monthlyRows.length}건</span>
+          </div>
         </div>
         {monthlyRows.length === 0 ? (
           <div className="empty-state compact teacher-detail-empty--centered">해당 월 월별 수금 학생이 없습니다.</div>
@@ -73,8 +80,10 @@ export default function TeacherSettlementDetailBody({ detail, formatCurrency }) 
 
       <section className="teacher-detail-block teacher-detail-block--flat teacher-detail-block--per-session">
         <div className="teacher-detail-block__header">
-          <h4>회차별 수업</h4>
-          <span>{perSessionRows.length}건</span>
+          <div className="teacher-detail-block__title">
+            <h4>회차별 수업</h4>
+            <span className="teacher-detail-block__count">{perSessionRows.length}건</span>
+          </div>
         </div>
         {perSessionRows.length === 0 ? (
           <div className="empty-state compact teacher-detail-empty--centered">해당 월 회당 수금 학생이 없습니다.</div>
@@ -149,8 +158,10 @@ export default function TeacherSettlementDetailBody({ detail, formatCurrency }) 
 
       <section className="teacher-detail-block teacher-detail-block--flat">
         <div className="teacher-detail-block__header teacher-detail-block__header--trial">
-          <h4>시범 수업</h4>
-          <span>{trialRows.length}건</span>
+          <div className="teacher-detail-block__title">
+            <h4>시범 수업</h4>
+            <span className="teacher-detail-block__count">{trialRows.length}건</span>
+          </div>
         </div>
         {trialRows.length === 0 ? (
           <div className="empty-state compact teacher-detail-empty--centered">해당 월 시범 수업이 없습니다.</div>
@@ -181,6 +192,8 @@ export default function TeacherSettlementDetailBody({ detail, formatCurrency }) 
           </div>
         )}
       </section>
+      </>
+      )}
     </div>
   )
 }

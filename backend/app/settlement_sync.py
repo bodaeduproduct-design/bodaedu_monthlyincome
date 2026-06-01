@@ -37,11 +37,18 @@ def _safe_int(value) -> int:
         return 0
 
 
-def _settlement_gross_for_payment(row: MonthlyPaymentRecord) -> int:
+def _settlement_gross_for_payment(db: Session, row: MonthlyPaymentRecord) -> int:
     """선생님 정산 집계: 회차별은 진행 회차만, 월별·특이금액은 수납 기준."""
     unit = str(row.billing_unit or "").strip() or "monthly"
     if unit == "per_session":
-        return per_session_teacher_settlement_gross(row)
+        from .session_carryover import carryover_out_sessions_for_month
+
+        carryover_out = carryover_out_sessions_for_month(
+            db,
+            enrollment_id=int(row.enrollment_id or 0),
+            source_billing_month=str(row.billing_month or ""),
+        )
+        return per_session_teacher_settlement_gross(row, carryover_out_sessions=carryover_out)
     return payment_row_collection_amount(row)
 
 
@@ -86,7 +93,7 @@ def sync_settlements_from_payments(
         if unit not in ("monthly", "per_session"):
             continue
         key = (int(row.teacher_id), str(row.billing_month), unit)
-        gross = _settlement_gross_for_payment(row)
+        gross = _settlement_gross_for_payment(db, row)
         rate = float(row.commission_rate if row.commission_rate is not None else 60.0)
         row_counts[key] = row_counts.get(key, 0) + 1
         if key not in buckets:

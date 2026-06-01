@@ -26,6 +26,8 @@ const DB_SUB_NAV = [
 
 const DB_PAGE_IDS = new Set(DB_SUB_NAV.map((item) => item.id))
 
+const SETTLEMENT_TEST_EMAIL = 'bodaedu_product@bodaedu.kr'
+
 function isDbPage(pageId) {
   return DB_PAGE_IDS.has(pageId)
 }
@@ -176,6 +178,13 @@ function studentDisplayAmount(student, filter) {
   if (filter === 'monthly') return Number(student?.month_paid_amount_monthly || 0)
   if (filter === 'per_session') return Number(student?.month_paid_amount_per_session || 0)
   return Number(student?.month_paid_amount || 0)
+}
+
+function studentDisplayAmountBreakdown(student) {
+  const monthly = Number(student?.month_paid_amount_monthly || 0)
+  const perSession = Number(student?.month_paid_amount_per_session || 0)
+  const total = Number(student?.month_paid_amount || 0)
+  return { monthly, perSession, total }
 }
 
 export default function BodaApp() {
@@ -423,8 +432,13 @@ export default function BodaApp() {
   const [teacherNotice, setTeacherNotice] = useState('')
   const [teacherSearch, setTeacherSearch] = useState('')
   const [teacherEmailSending, setTeacherEmailSending] = useState(false)
+  const [teacherEmailPreviewing, setTeacherEmailPreviewing] = useState(false)
   const [teacherEmailModalOpen, setTeacherEmailModalOpen] = useState(false)
   const [teacherEmailSelection, setTeacherEmailSelection] = useState({})
+  const [settlementEmailStatus, setSettlementEmailStatus] = useState({
+    smtp_ready: false,
+    test_email: SETTLEMENT_TEST_EMAIL,
+  })
   const [teacherListExporting, setTeacherListExporting] = useState(false)
   const [teacherDetail, setTeacherDetail] = useState(null)
   const [teacherDetailLoading, setTeacherDetailLoading] = useState(false)
@@ -470,6 +484,19 @@ export default function BodaApp() {
     }
   }, [selectedPage, selectedMonth])
 
+  useEffect(() => {
+    if (selectedPage !== 'teacher-settlements') return
+    let cancelled = false
+    apiRequest('/api/teachers/settlements/email-status')
+      .then((res) => {
+        if (!cancelled) setSettlementEmailStatus(res)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [selectedPage])
+
   const teacherTotals = useMemo(() => {
     return (teacherAggregated ?? []).reduce(
       (acc, row) => ({
@@ -513,6 +540,112 @@ export default function BodaApp() {
       requestAnimationFrame(() => requestAnimationFrame(resolve))
     })
 
+  const resolveSettlementTestTeacher = () => {
+    if (selectedTeacherIds.length > 0) {
+      const row = teacherEmailRows.find((item) => item.teacher_id === selectedTeacherIds[0])
+      if (row) {
+        return { teacher_id: row.teacher_id, teacher_name: row.teacher_name }
+      }
+    }
+    const fallback = (teacherAggregated ?? []).find((row) => row.teacher_name === '서재현')
+    if (fallback) {
+      return { teacher_id: fallback.teacher_id, teacher_name: fallback.teacher_name }
+    }
+    return null
+  }
+
+  const captureTeacherSummaryPngBase64 = async (teacherId, billingMonth, teacherName) => {
+    setTeacherNotice(`요약 이미지 준비 중… ${teacherName ?? ''}`)
+    const detail = await apiRequest(
+      `/api/teachers/${teacherId}/settlements/${encodeURIComponent(billingMonth)}`,
+    )
+    setEmailCaptureDetail(detail)
+    await waitForPaint()
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    if (!emailCaptureRef.current) {
+      setEmailCaptureDetail(null)
+      throw new Error('이미지 캡처 영역을 찾을 수 없습니다.')
+    }
+    const canvas = await html2canvas(emailCaptureRef.current, {
+      backgroundColor: '#ffffff',
+      scale: 2,
+      useCORS: true,
+    })
+    setEmailCaptureDetail(null)
+    return canvas.toDataURL('image/png').split(',')[1]
+  }
+
+  const downloadTeacherSummaryPreview = async () => {
+    const target = resolveSettlementTestTeacher()
+    if (!target) {
+      setTeacherError('미리볼 선생님을 찾을 수 없습니다. 메일 모달에서 선택하거나 서재현 데이터가 필요합니다.')
+      return
+    }
+    setTeacherEmailPreviewing(true)
+    setTeacherError('')
+    try {
+      const pngBase64 = await captureTeacherSummaryPngBase64(
+        target.teacher_id,
+        selectedMonth,
+        target.teacher_name,
+      )
+      const anchor = document.createElement('a')
+      anchor.href = `data:image/png;base64,${pngBase64}`
+      const safeName = `${target.teacher_name}_${formatMonth(selectedMonth)}`.replace(/[\\/:*?"<>|]/g, '_')
+      anchor.download = `정산요약_${safeName}.png`
+      anchor.click()
+      setTeacherNotice(`${target.teacher_name} 요약 이미지를 저장했습니다.`)
+    } catch (e) {
+      setTeacherError(e.message || '요약 이미지 저장에 실패했습니다.')
+    } finally {
+      setTeacherEmailPreviewing(false)
+    }
+  }
+
+  const sendSettlementTestEmail = async () => {
+    const target = resolveSettlementTestTeacher()
+    const testEmail = settlementEmailStatus?.test_email ?? SETTLEMENT_TEST_EMAIL
+    if (!target) {
+      setTeacherError('테스트할 선생님을 찾을 수 없습니다.')
+      return
+    }
+    if (
+      !window.confirm(
+        `${target.teacher_name} 선생님 ${formatMonth(selectedMonth)} 요약 PNG를\n${testEmail} 로 테스트 발송할까요?`,
+      )
+    ) {
+      return
+    }
+    setTeacherEmailSending(true)
+    setTeacherError('')
+    setTeacherNotice('')
+    try {
+      const pngBase64 = await captureTeacherSummaryPngBase64(
+        target.teacher_id,
+        selectedMonth,
+        target.teacher_name,
+      )
+      setTeacherNotice('테스트 메일 발송 중…')
+      const res = await apiRequest('/api/teachers/settlements/send-email/test', {
+        method: 'POST',
+        body: JSON.stringify({
+          billing_month: selectedMonth,
+          teacher_id: target.teacher_id,
+          png_base64: pngBase64,
+          to_email: testEmail,
+        }),
+      })
+      setTeacherNotice(
+        `테스트 메일 발송 완료: ${res.teacher_name} → ${res.to_email} (${formatCurrency(res.net_amount ?? 0)})`,
+      )
+    } catch (e) {
+      setEmailCaptureDetail(null)
+      setTeacherError(e.message || '테스트 메일 발송에 실패했습니다.')
+    } finally {
+      setTeacherEmailSending(false)
+    }
+  }
+
   const buildTeacherEmailAttachments = async (teacherIds, billingMonth) => {
     const attachments = []
     for (let index = 0; index < teacherIds.length; index += 1) {
@@ -521,26 +654,16 @@ export default function BodaApp() {
       setTeacherNotice(
         `정산서 이미지 준비 중 (${index + 1}/${teacherIds.length})… ${row?.teacher_name ?? ''}`,
       )
-      const detail = await apiRequest(
-        `/api/teachers/${teacherId}/settlements/${encodeURIComponent(billingMonth)}`,
+      const png_base64 = await captureTeacherSummaryPngBase64(
+        teacherId,
+        billingMonth,
+        row?.teacher_name,
       )
-      setEmailCaptureDetail(detail)
-      await waitForPaint()
-      await new Promise((resolve) => setTimeout(resolve, 250))
-      if (!emailCaptureRef.current) {
-        throw new Error('이미지 캡처 영역을 찾을 수 없습니다.')
-      }
-      const canvas = await html2canvas(emailCaptureRef.current, {
-        backgroundColor: '#ffffff',
-        scale: 2,
-        useCORS: true,
-      })
       attachments.push({
         teacher_id: teacherId,
-        png_base64: canvas.toDataURL('image/png').split(',')[1],
+        png_base64,
       })
     }
-    setEmailCaptureDetail(null)
     return attachments
   }
 
@@ -590,6 +713,24 @@ export default function BodaApp() {
             <button
               type="button"
               className="secondary-button"
+              disabled={teacherEmailPreviewing || teacherLoading || !selectedMonth}
+              title="요약 PNG 저장 (선택 1명 또는 서재현)"
+              onClick={() => downloadTeacherSummaryPreview()}
+            >
+              {teacherEmailPreviewing ? '저장 중...' : '요약 미리보기'}
+            </button>
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={teacherEmailSending || teacherLoading || !selectedMonth}
+              title={`테스트 수신: ${settlementEmailStatus?.test_email ?? SETTLEMENT_TEST_EMAIL}`}
+              onClick={() => sendSettlementTestEmail()}
+            >
+              {teacherEmailSending ? '발송 중...' : '테스트 메일'}
+            </button>
+            <button
+              type="button"
+              className="secondary-button"
               disabled={teacherEmailSending || teacherLoading || filteredTeacherRows.length === 0}
               onClick={() => {
                 const initial = {}
@@ -609,6 +750,12 @@ export default function BodaApp() {
           <div className="teacher-settlement-alerts">
             {teacherNotice ? <div className="banner success">{teacherNotice}</div> : null}
             {teacherError ? <div className="banner error">{teacherError}</div> : null}
+          </div>
+        ) : null}
+        {settlementEmailStatus && !settlementEmailStatus.smtp_ready ? (
+          <div className="banner error">
+            SMTP가 설정되지 않았습니다. 터미널에서{' '}
+            <code>정산앱/backend/start-smtp.sh</code> 로 백엔드를 실행한 뒤 테스트 메일을 보내세요.
           </div>
         ) : null}
         {(rateAdjustments?.notice_count ?? 0) > 0 ? (
@@ -805,6 +952,23 @@ export default function BodaApp() {
           title={`${formatMonth(selectedMonth)} 정산 메일 발송 대상 선택`}
           onClose={() => setTeacherEmailModalOpen(false)}
           headerActions={
+            <div className="teacher-email-modal-actions">
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={teacherEmailPreviewing || teacherEmailSending}
+              onClick={() => downloadTeacherSummaryPreview()}
+            >
+              {teacherEmailPreviewing ? '저장 중...' : '요약 미리보기'}
+            </button>
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={teacherEmailSending}
+              onClick={() => sendSettlementTestEmail()}
+            >
+              {teacherEmailSending ? '발송 중...' : '테스트 메일'}
+            </button>
             <button
               type="button"
               className="primary-button"
@@ -822,6 +986,9 @@ export default function BodaApp() {
                 setTeacherNotice('')
                 try {
                   const attachments = await buildTeacherEmailAttachments(selectedTeacherIds, selectedMonth)
+                  if (attachments.length !== selectedTeacherIds.length) {
+                    throw new Error('정산 상세 내역서 이미지를 모두 만들지 못했습니다.')
+                  }
                   setTeacherNotice('메일 발송 중…')
                   const res = await apiRequest('/api/teachers/settlements/send-email', {
                     method: 'POST',
@@ -856,8 +1023,14 @@ export default function BodaApp() {
             >
               {teacherEmailSending ? '발송 중...' : `선택 ${selectedTeacherIds.length}명 발송`}
             </button>
+            </div>
           }
         >
+          <p className="teacher-email-send__hint">
+            테스트 메일은 <strong>{settlementEmailStatus?.test_email ?? SETTLEMENT_TEST_EMAIL}</strong> 로만
+            발송됩니다. 요약 미리보기·테스트는 선택한 첫 번째 선생님 기준이며, 선택이 없으면 서재현 선생님
+            데이터를 사용합니다.
+          </p>
           <div className="teacher-email-send">
             <div className="teacher-email-send__toolbar">
               <label className="teacher-email-send__select-all">
@@ -939,8 +1112,18 @@ export default function BodaApp() {
         </DetailModal>
       ) : null}
 
-      <div className="teacher-email-capture-host" ref={emailCaptureRef} aria-hidden="true">
-        <TeacherSettlementDetailBody detail={emailCaptureDetail} formatCurrency={formatCurrency} />
+      <div
+        className="teacher-email-capture-host teacher-email-capture-host--summary"
+        ref={emailCaptureRef}
+        aria-hidden="true"
+      >
+        {emailCaptureDetail ? (
+          <TeacherSettlementDetailBody
+            detail={emailCaptureDetail}
+            formatCurrency={formatCurrency}
+            variant="summary"
+          />
+        ) : null}
       </div>
     </>
   )
@@ -1204,7 +1387,20 @@ export default function BodaApp() {
                           {(student.payment_methods ?? []).map((m) => formatPaymentMethodLabel(m)).join(', ') || '-'}
                         </td>
                         <td>
-                          <strong>{formatCurrency(studentDisplayAmount(student, studentBillingFilter))}</strong>
+                          {(() => {
+                            const amounts = studentDisplayAmountBreakdown(student)
+                            const display = studentDisplayAmount(student, studentBillingFilter)
+                            return (
+                              <>
+                                <strong>{formatCurrency(display)}</strong>
+                                {studentBillingFilter === 'all' ? (
+                                  <small className="table-sub">
+                                    월별 {formatCurrency(amounts.monthly)} / 회당 {formatCurrency(amounts.perSession)}
+                                  </small>
+                                ) : null}
+                              </>
+                            )
+                          })()}
                         </td>
                         <td>
                           <button
@@ -1274,7 +1470,20 @@ export default function BodaApp() {
                         <td>
                           {studentDisplayAmount(student, studentBillingFilter) > 0 ? (
                             <strong className="students-amount--pending">
-                              {formatCurrency(studentDisplayAmount(student, studentBillingFilter))}
+                              {(() => {
+                                const amounts = studentDisplayAmountBreakdown(student)
+                                const display = studentDisplayAmount(student, studentBillingFilter)
+                                return (
+                                  <>
+                                    {formatCurrency(display)}
+                                    {studentBillingFilter === 'all' ? (
+                                      <small className="table-sub">
+                                        월별 {formatCurrency(amounts.monthly)} / 회당 {formatCurrency(amounts.perSession)}
+                                      </small>
+                                    ) : null}
+                                  </>
+                                )
+                              })()}
                             </strong>
                           ) : (
                             <strong className="students-amount--pending">미납 / 예정</strong>

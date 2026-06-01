@@ -166,21 +166,18 @@ def build_teacher_settlement_detail(
         )
         rate = _safe_float(row.commission_rate if row.commission_rate is not None else 60.0)
         collection_amount = payment_row_collection_amount(row)
-        teacher_gross = (
-            per_session_teacher_settlement_gross(row)
-            if row.billing_unit == "per_session"
-            else collection_amount
-        )
         amount = collection_amount
         total_sessions = _safe_int(row.total_sessions)
         completed_sessions = _safe_int(row.completed_sessions)
         per_session_unit_price = int(round(_safe_int(row.base_amount) / total_sessions)) if total_sessions > 0 else 0
-        share = teacher_share_from_payment(teacher_gross, rate)
-        tuition_gross += collection_amount
-        tuition_teacher_share += share
-        weighted_rate_sum += teacher_gross * rate
         carryover_out = carryover_out_by_enrollment.get(int(row.enrollment_id or 0))
         carryover_in = carryover_in_by_enrollment.get(int(row.enrollment_id or 0))
+        carryover_out_sessions = _safe_int(carryover_out["session_count"]) if carryover_out else 0
+        teacher_gross = (
+            per_session_teacher_settlement_gross(row, carryover_out_sessions=carryover_out_sessions)
+            if row.billing_unit == "per_session"
+            else collection_amount
+        )
         carryover_in_sessions = _safe_int(carryover_in["session_count"]) if carryover_in else 0
         carryover_share_pre_tax = _safe_int(carryover_in["teacher_share"]) if carryover_in else 0
         carryover_delta, carryover_display = _carryover_delta_display(
@@ -193,6 +190,7 @@ def build_teacher_settlement_detail(
             # 정산 수납액: 학생 수납 전액이 아니라 실진행(진행) 회차 × 회차당 단가
             settlement_session_count = progress_sessions
             settlement_gross_amount = progress_sessions * per_session_unit_price
+            teacher_gross = settlement_gross_amount
             tuition_gross_amount = collection_amount
         else:
             progress_gross_amount = (
@@ -201,6 +199,10 @@ def build_teacher_settlement_detail(
             settlement_session_count = progress_sessions
             settlement_gross_amount = progress_gross_amount
             tuition_gross_amount = collection_amount
+        share = teacher_share_from_payment(teacher_gross, rate)
+        tuition_gross += collection_amount
+        tuition_teacher_share += share
+        weighted_rate_sum += teacher_gross * rate
         teacher_share_total = share + carryover_share_pre_tax
         regular_payments.append(
             {

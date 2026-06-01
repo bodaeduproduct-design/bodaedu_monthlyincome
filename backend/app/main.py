@@ -120,6 +120,16 @@ class SettlementEmailSendPayload(BaseModel):
     attachments: Optional[list[TeacherEmailAttachment]] = None
 
 
+class SettlementEmailTestPayload(BaseModel):
+    billing_month: str
+    teacher_id: int
+    png_base64: str
+    to_email: Optional[str] = None
+
+
+SETTLEMENT_TEST_EMAIL_DEFAULT = "bodaedu_product@bodaedu.kr"
+
+
 def _safe_int(value: Any) -> int:
     try:
         return int(value or 0)
@@ -346,21 +356,40 @@ def _teacher_settlement_breakdown(db: Session, teacher_id: int, billing_month: s
     per_session_net = 0
     carryover_pre_tax = 0
     carryover_net = 0
+    trial_pre_tax = 0
+    trial_net = 0
     for row in rows:
         settlement_type = str(row.settlement_type or "")
         pre_tax = _safe_int(row.pre_tax_amount)
         net = _safe_int(row.net_amount)
+        trial_fee = _safe_int(row.trial_fee)
+        trial_net_part = _trial_net_portion(row)
+        regular_pre_tax = max(0, pre_tax - trial_fee)
+        regular_net = max(0, net - trial_net_part)
+
         if settlement_type == "monthly":
-            monthly_pre_tax += pre_tax
-            monthly_net += net
+            monthly_pre_tax += regular_pre_tax
+            monthly_net += regular_net
         elif settlement_type == "per_session":
-            per_session_pre_tax += pre_tax
-            per_session_net += net
+            per_session_pre_tax += regular_pre_tax
+            per_session_net += regular_net
         elif settlement_type == "carryover":
             carryover_pre_tax += pre_tax
             carryover_net += net
+        elif settlement_type == "trial":
+            trial_pre_tax += pre_tax
+            trial_net += net
 
-    trial_pre_tax, trial_net = _teacher_trial_totals_for_month(db, teacher_id, billing_month)
+        if trial_fee > 0 and settlement_type in ("monthly", "per_session"):
+            trial_pre_tax += trial_fee
+            trial_net += trial_net_part
+
+    if trial_pre_tax <= 0:
+        enroll_fee = _sum_teacher_enrollment_trial_fee(db, teacher_id, billing_month)
+        if enroll_fee > 0:
+            trial_pre_tax = enroll_fee
+            trial_net = int(round(enroll_fee * SETTLEMENT_FEE_MULTIPLIER))
+
     total_pre_tax = monthly_pre_tax + per_session_pre_tax + trial_pre_tax + carryover_pre_tax
     total_net = monthly_net + per_session_net + trial_net + carryover_net
     return {
@@ -1502,6 +1531,7 @@ def _send_settlement_email(
     billing_month: str,
     net_amount: int,
     png_bytes: Optional[bytes] = None,
+    subject_prefix: str = "",
 ) -> None:
     host = (os.getenv("SMTP_HOST") or "").strip()
     port = int(os.getenv("SMTP_PORT") or "587")
@@ -1516,17 +1546,20 @@ def _send_settlement_email(
             detail="SMTP 설정이 필요합니다. SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS/SMTP_FROM 환경변수를 설정하세요.",
         )
 
-    subject = f"[보다수학] {billing_month} 정산 내역 안내 ({teacher_name})"
-    detail_line = (
-        "상세 내역은 첨부된 정산서 이미지를 확인해 주세요.\n"
-        if png_bytes
-        else "상세 내역은 정산 화면에서 확인해 주세요.\n"
+    prefix = str(subject_prefix or "")
+    subject = f"{prefix}[보다수학] {billing_month} 정산 내역 안내 ({teacher_name})"
+    detail_line = "정산 요약 내역서는 첨부 PNG 이미지를 확인해 주세요.\n"
+    test_note = (
+        f"\n(테스트 메일 — 수신 주소: {to_email})\n"
+        if prefix.strip() == "[테스트]"
+        else ""
     )
     body = (
         f"{teacher_name} 선생님\n\n"
         f"{billing_month} 정산 내역을 안내드립니다.\n"
         f"- 최종 정산금액: {format_currency(net_amount)}\n\n"
         f"{detail_line}"
+        f"{test_note}"
         "감사합니다."
     )
     message = EmailMessage()
@@ -1555,6 +1588,66 @@ def format_currency(value: int) -> str:
         return f"₩{int(value):,}"
     except Exception:
         return f"₩{value}"
+
+
+@app.get("/api/teachers/settlements/email-status")
+def settlement_email_status():
+    host = (os.getenv("SMTP_HOST") or "").strip()
+    from_email = (os.getenv("SMTP_FROM") or os.getenv("SMTP_USER") or "").strip()
+    test_email = (os.getenv("SETTLEMENT_TEST_EMAIL") or SETTLEMENT_TEST_EMAIL_DEFAULT).strip()
+    return {
+        "smtp_ready": bool(host and from_email),
+        "smtp_host": host or None,
+        "from_email": from_email or None,
+        "test_email": test_email,
+    }
+
+
+@app.post("/api/teachers/settlements/send-email/test")
+def send_teacher_settlement_test_email(payload: SettlementEmailTestPayload, db: Session = Depends(get_db)):
+    billing_month = str(payload.billing_month or "").strip()
+    if not billing_month:
+        raise HTTPException(status_code=400, detail="billing_month는 필수입니다.")
+    teacher_id = int(payload.teacher_id)
+    to_email = (payload.to_email or os.getenv("SETTLEMENT_TEST_EMAIL") or SETTLEMENT_TEST_EMAIL_DEFAULT).strip()
+    if not to_email:
+        raise HTTPException(status_code=400, detail="테스트 수신 이메일이 필요합니다.")
+    try:
+        png_bytes = _decode_png_base64(payload.png_base64)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"첨부 이미지 디코딩 실패: {exc}") from exc
+    if not png_bytes:
+        raise HTTPException(status_code=400, detail="정산 요약 이미지가 비어 있습니다.")
+
+    teacher_name = _teacher_name_by_profile_id(db, teacher_id)
+    net_amount = (
+        db.query(func.coalesce(func.sum(Settlement.net_amount), 0))
+        .filter(Settlement.teacher_id == teacher_id, Settlement.billing_month == billing_month)
+        .scalar()
+    )
+    try:
+        _send_settlement_email(
+            to_email,
+            teacher_name=teacher_name,
+            billing_month=billing_month,
+            net_amount=_safe_int(net_amount),
+            png_bytes=png_bytes,
+            subject_prefix="[테스트] ",
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {
+        "ok": True,
+        "test": True,
+        "teacher_id": teacher_id,
+        "teacher_name": teacher_name,
+        "billing_month": billing_month,
+        "to_email": to_email,
+        "net_amount": _safe_int(net_amount),
+    }
 
 
 @app.post("/api/teachers/settlements/send-email")
@@ -1594,13 +1687,23 @@ def send_teacher_settlement_emails(payload: SettlementEmailSendPayload, db: Sess
         if not email:
             skipped.append({"teacher_id": int(teacher_id), "teacher_name": teacher_name, "reason": "email 없음"})
             continue
+        png_bytes = attachment_by_teacher.get(int(teacher_id))
+        if not png_bytes:
+            failed.append(
+                {
+                    "teacher_id": int(teacher_id),
+                    "teacher_name": teacher_name,
+                    "reason": "정산 상세 내역서 이미지 없음",
+                }
+            )
+            continue
         try:
             _send_settlement_email(
                 email,
                 teacher_name=teacher_name,
                 billing_month=billing_month,
                 net_amount=_safe_int(net_amount),
-                png_bytes=attachment_by_teacher.get(int(teacher_id)),
+                png_bytes=png_bytes,
             )
             sent.append(
                 {

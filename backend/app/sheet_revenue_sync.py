@@ -15,8 +15,8 @@ from typing import Any, Optional
 from openpyxl import load_workbook
 from sqlalchemy.orm import Session
 
-from .models import LessonEnrollment, MonthlyPaymentRecord, StudentProfile, TeacherProfile, User
-from .payment_pricing import recompute_payment_final_amount
+from .models import LessonEnrollment, MonthlyPaymentRecord, Product, StudentProfile, TeacherProfile, User
+from .payment_pricing import is_price_35_student_name, monthly_amount_for_enrollment, recompute_payment_final_amount
 from .settlement_sync import sync_settlements_from_payments
 
 RECURRING_CHARGE_LABELS = frozenset({"정기결제", "첫달결제"})
@@ -449,14 +449,29 @@ def _apply_sheet_row_to_payment(
         recompute_payment_final_amount(payment, priced_amount=sheet_row.amount)
         enrollment.price_type = "session"
     else:
+        product = db.get(Product, enrollment.product_id) if enrollment.product_id else None
+        monthly_amount = monthly_amount_for_enrollment(
+            db,
+            enrollment,
+            product,
+            sheet_row.billing_month,
+            sheet_amount=sheet_row.amount,
+            charge_label=sheet_row.charge_label,
+        )
         payment.total_sessions = 0
         payment.completed_sessions = 0
-        payment.base_amount = sheet_row.amount
+        payment.base_amount = monthly_amount
         payment.special_amount = 0
         payment.refund_amount = 0
-        recompute_payment_final_amount(payment, priced_amount=sheet_row.amount)
-        if not enrollment.price_type:
-            enrollment.price_type = "monthly"
+        recompute_payment_final_amount(payment, priced_amount=monthly_amount)
+        if not enrollment.price_type or str(enrollment.price_type).strip() == "monthly":
+            student_name = (
+                db.query(User.name)
+                .join(StudentProfile, StudentProfile.user_id == User.id)
+                .filter(StudentProfile.id == enrollment.student_id)
+                .scalar()
+            )
+            enrollment.price_type = "price_35" if is_price_35_student_name(student_name or "") else "price_17"
 
     payment.payment_tag = _payment_tag_from_charge(sheet_row.charge_label)
     if sheet_row.amount > 0:

@@ -25,6 +25,23 @@ def carryover_teacher_share(carryover: SessionCarryover) -> int:
     return int(round(gross * rate / 100.0))
 
 
+def carryover_out_sessions_for_month(
+    db: Session,
+    *,
+    enrollment_id: int,
+    source_billing_month: str,
+) -> int:
+    rows = (
+        db.query(SessionCarryover)
+        .filter(
+            SessionCarryover.enrollment_id == int(enrollment_id),
+            SessionCarryover.source_billing_month == str(source_billing_month),
+        )
+        .all()
+    )
+    return sum(max(0, _safe_int(row.session_count)) for row in rows)
+
+
 def carryover_net_amount(carryover: SessionCarryover) -> int:
     from .settlement_detail import net_after_settlement_fee
 
