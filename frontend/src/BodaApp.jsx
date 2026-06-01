@@ -791,9 +791,9 @@ export default function BodaApp() {
               <SettlementMetric label="회차별 수업 (세전)" value={formatCurrency(teacherOverview.totalPerSessionPreTax)} />
               <SettlementMetric label="시범 수업 (세전)" value={formatCurrency(teacherOverview.totalTrialPreTax)} />
               <SettlementMetric
-                label="최종 정산 합계 (세후)"
-                value={formatCurrency(teacherTotals.net_amount)}
-                sub={`세전 ${formatCurrency(teacherOverview.totalPreTax)}`}
+                label="최종 정산 합계"
+                value={formatCurrency(teacherOverview.totalPreTax)}
+                sub={formatCurrency(teacherTotals.net_amount)}
               />
             </div>
 
@@ -806,7 +806,7 @@ export default function BodaApp() {
                     <th>월별 수업 (세전)</th>
                     <th>회차별 수업 (세전)</th>
                     <th>시범 수업 (세전)</th>
-                    <th>최종 정산 (세후)</th>
+                    <th>최종 정산</th>
                     <th>상세</th>
                   </tr>
                 </thead>
@@ -823,8 +823,8 @@ export default function BodaApp() {
                       <td>{formatCurrency(row.per_session_pre_tax_amount ?? 0)}</td>
                       <td>{formatCurrency(row.trial_pre_tax_amount ?? 0)}</td>
                       <td>
-                        <strong>{formatCurrency(row.net_amount)}</strong>
-                        <small className="table-sub">{formatCurrency(row.pre_tax_amount ?? 0)}</small>
+                        <strong>{formatCurrency(row.pre_tax_amount ?? 0)}</strong>
+                        <small className="table-sub">{formatCurrency(row.net_amount)}</small>
                       </td>
                       <td>
                         <button
