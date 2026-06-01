@@ -9,14 +9,29 @@ from sqlalchemy.orm import Session, aliased
 
 from .enrollment_billing import parse_date_only
 from .models import LessonEnrollment, MonthlyPaymentRecord, StudentProfile, TeacherProfile, User
-from .settlement_sync import sync_settlements_from_payments
-
-# 고정 수수료율 (개월차 자동 상향 미적용)
+# 고정 수수료율 (개월차 자동 상향 미적용) — 선생님 지급 %
 TEACHER_FIXED_COMMISSION_RATES: dict[str, float] = {
     "신태준": 80.0,
     "윤성민": 80.0,
-    "서재현": 100.0,
 }
+
+# 매출 전액 회사 귀속(선생님 정산 0원). UI·등록상 수수료 100% = 회사 100% 의미.
+TEACHER_COMPANY_RETAINED_REVENUE = frozenset({"서재현"})
+COMPANY_RETENTION_DISPLAY_RATE = 100.0
+
+
+def is_company_retained_teacher(teacher_name: str) -> bool:
+    return str(teacher_name or "").strip() in TEACHER_COMPANY_RETAINED_REVENUE
+
+
+def teacher_name_by_profile_id(db: Session, teacher_id: int) -> str:
+    name = (
+        db.query(User.name)
+        .join(TeacherProfile, TeacherProfile.user_id == User.id)
+        .filter(TeacherProfile.id == int(teacher_id))
+        .scalar()
+    )
+    return str(name or "").strip()
 
 
 def expected_commission_rate_by_tenure(start: date, billing_month: str) -> float:
@@ -37,7 +52,11 @@ def resolve_commission_rate(
     enrollment: LessonEnrollment,
     billing_month: str,
 ) -> float:
+    """표시·등록용 수수료율(회사 귀속 선생님은 100%)."""
     name = str(teacher_name or "").strip()
+    if name in TEACHER_COMPANY_RETAINED_REVENUE:
+        return COMPANY_RETENTION_DISPLAY_RATE
+
     if name in TEACHER_FIXED_COMMISSION_RATES:
         return float(TEACHER_FIXED_COMMISSION_RATES[name])
 
@@ -48,6 +67,24 @@ def resolve_commission_rate(
         return float(enrollment.current_commission_rate or enrollment.base_commission_rate or 60.0)
     except (TypeError, ValueError):
         return 60.0
+
+
+def teacher_payout_commission_rate(
+    teacher_name: str,
+    enrollment: LessonEnrollment,
+    billing_month: str,
+) -> float:
+    """실제 선생님 지급 계산용 수수료율(회사 귀속 선생님은 0%)."""
+    if is_company_retained_teacher(teacher_name):
+        return 0.0
+    return resolve_commission_rate(teacher_name, enrollment, billing_month)
+
+
+def teacher_settlement_gross_basis(teacher_name: str, gross_basis: int) -> int:
+    """선생님 정산 집계 기준 금액 — 회사 귀속 선생님은 0."""
+    if is_company_retained_teacher(teacher_name):
+        return 0
+    return max(0, int(gross_basis or 0))
 
 
 def _payment_rows_query(
@@ -89,27 +126,34 @@ def apply_commission_rates_sync(
 
     for payment, enrollment, teacher_name, _student_name in rows:
         month = str(payment.billing_month)
-        expected = resolve_commission_rate(teacher_name, enrollment, month)
+        display_rate = resolve_commission_rate(teacher_name, enrollment, month)
+        payout_rate = teacher_payout_commission_rate(teacher_name, enrollment, month)
+        name = str(teacher_name or "").strip()
         current = float(payment.commission_rate or 60.0)
-        if abs(current - expected) >= 1e-6:
-            payment.commission_rate = expected
+        if abs(current - payout_rate) >= 1e-6:
+            payment.commission_rate = payout_rate
             changed_payments += 1
+        if name in TEACHER_COMPANY_RETAINED_REVENUE or abs(current - payout_rate) >= 1e-6:
             touched_teacher_months.add((int(payment.teacher_id), month))
 
-        name = str(teacher_name or "").strip()
-        if name in TEACHER_FIXED_COMMISSION_RATES:
+        if name in TEACHER_COMPANY_RETAINED_REVENUE:
+            enrollment.base_commission_rate = COMPANY_RETENTION_DISPLAY_RATE
+            enrollment.current_commission_rate = COMPANY_RETENTION_DISPLAY_RATE
+        elif name in TEACHER_FIXED_COMMISSION_RATES:
             fixed = TEACHER_FIXED_COMMISSION_RATES[name]
             enrollment.base_commission_rate = fixed
             enrollment.current_commission_rate = fixed
         else:
             prev = enrollment_latest_rate.get(int(enrollment.id))
             if prev is None or month >= prev[0]:
-                enrollment_latest_rate[int(enrollment.id)] = (month, expected)
+                enrollment_latest_rate[int(enrollment.id)] = (month, display_rate)
 
     for enrollment_id, (_month, rate) in enrollment_latest_rate.items():
         enrollment = db.get(LessonEnrollment, enrollment_id)
         if enrollment and float(enrollment.current_commission_rate or 0) != rate:
             enrollment.current_commission_rate = rate
+
+    from .settlement_sync import sync_settlements_from_payments
 
     for teacher_id, month in sorted(touched_teacher_months):
         sync_settlements_from_payments(db, billing_month=month, teacher_id=teacher_id)

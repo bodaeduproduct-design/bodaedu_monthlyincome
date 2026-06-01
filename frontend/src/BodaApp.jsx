@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import html2canvas from 'html2canvas'
-import { formatPaymentMethodLabel, SimpleBarChart, SimpleDonutChart } from './charts.jsx'
+import {
+  formatPaymentMethodLabel,
+  normalizePaymentMethodKey,
+  paymentMethodFilterLabel,
+  SimpleBarChart,
+  SimpleDonutChart,
+} from './charts.jsx'
 import DataAdminView from './DataAdminView.jsx'
 import DataOverviewView from './DataOverviewView.jsx'
 import DataRegisterView from './DataRegisterView.jsx'
@@ -1132,6 +1138,7 @@ export default function BodaApp() {
   const [studentsLoading, setStudentsLoading] = useState(false)
   const [studentsError, setStudentsError] = useState('')
   const [studentBillingFilter, setStudentBillingFilter] = useState('all')
+  const [studentPaymentMethodFilter, setStudentPaymentMethodFilter] = useState('all')
   const [studentPaymentTab, setStudentPaymentTab] = useState('all')
   const [selectedStudentId, setSelectedStudentId] = useState(null)
   const [studentDetail, setStudentDetail] = useState(null)
@@ -1168,10 +1175,22 @@ export default function BodaApp() {
     setStudentDetail(null)
     setStudentDetailError('')
     setStudentBillingFilter('all')
+    setStudentPaymentMethodFilter('all')
     setStudentPaymentTab('all')
   }, [selectedPage, selectedMonth])
 
-  const filteredStudents = useMemo(() => {
+  const studentPaymentMethodFilterOptions = useMemo(() => {
+    const keys = new Set()
+    for (const student of students) {
+      for (const method of student.payment_methods ?? []) {
+        keys.add(normalizePaymentMethodKey(method))
+      }
+    }
+    const order = ['card', 'transfer', 'payer', 'cms', 'other']
+    return ['all', ...order.filter((key) => keys.has(key)), ...[...keys].filter((key) => !order.includes(key)).sort()]
+  }, [students])
+
+  const billingFilteredStudents = useMemo(() => {
     if (studentBillingFilter === 'all') return students
     if (studentBillingFilter === 'monthly') {
       return students.filter(
@@ -1184,6 +1203,15 @@ export default function BodaApp() {
         (student.billing_units ?? []).includes('per_session') || (student.month_paid_amount_per_session ?? 0) > 0,
     )
   }, [students, studentBillingFilter])
+
+  const filteredStudents = useMemo(() => {
+    if (studentPaymentMethodFilter === 'all') return billingFilteredStudents
+    return billingFilteredStudents.filter((student) =>
+      (student.payment_methods ?? []).some(
+        (method) => normalizePaymentMethodKey(method) === studentPaymentMethodFilter,
+      ),
+    )
+  }, [billingFilteredStudents, studentPaymentMethodFilter])
 
   const studentCollectionSummary = useMemo(() => {
     const rows = filteredStudents ?? []
@@ -1321,6 +1349,21 @@ export default function BodaApp() {
               value={formatCurrency(studentCollectionSummary.paidAmount)}
               sub={`${formatMonth(selectedMonth)} 기준`}
             />
+          </div>
+        ) : null}
+        {!studentsLoading && studentPaymentMethodFilterOptions.length > 1 ? (
+          <div className="filter-chips filter-chips--payment-method">
+            <span className="filter-chips__label">결제수단</span>
+            {studentPaymentMethodFilterOptions.map((key) => (
+              <button
+                key={key}
+                type="button"
+                className={studentPaymentMethodFilter === key ? 'chip active' : 'chip'}
+                onClick={() => setStudentPaymentMethodFilter(key)}
+              >
+                {paymentMethodFilterLabel(key)}
+              </button>
+            ))}
           </div>
         ) : null}
         {!studentsLoading ? (

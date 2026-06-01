@@ -6,7 +6,37 @@ const LABEL = '#878a93'
 
 const DONUT_COLORS = ['#3182f6', '#70737c', '#aeb0b6', '#d9d9dc', '#e5e5e7', '#f0f0f1']
 
+const PAYMENT_METHOD_LABELS = {
+  card: '카드',
+  transfer: '계좌이체',
+  payer: '납부자',
+  cms: 'CMS',
+  other: '기타',
+}
+
+/** 결제수단 필터·집계용 키 (DB 표기 card/카드 등 통일) */
+export function normalizePaymentMethodKey(method) {
+  const raw = String(method ?? '').trim()
+  if (!raw) return 'other'
+  const lower = raw.toLowerCase()
+  if (lower === 'card' || raw === '카드') return 'card'
+  if (lower === 'transfer' || raw === '계좌이체') return 'transfer'
+  if (lower === 'payer' || raw === '납부자') return 'payer'
+  if (lower === 'cms') return 'cms'
+  if (raw === '결제' || raw === '미입력') return 'other'
+  return lower
+}
+
+export function paymentMethodFilterLabel(key) {
+  if (key === 'all') return '전체'
+  return PAYMENT_METHOD_LABELS[key] || key
+}
+
 export function formatPaymentMethodLabel(method) {
+  const key = normalizePaymentMethodKey(method)
+  if (key !== 'other' && PAYMENT_METHOD_LABELS[key]) {
+    return PAYMENT_METHOD_LABELS[key]
+  }
   const map = {
     card: '카드(효성)',
     transfer: '계좌이체',

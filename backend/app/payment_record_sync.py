@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from .enrollment_billing import enrollment_covers_billing_month, parse_date_only
 from .models import LessonEnrollment, MonthlyPaymentRecord, Product, TeacherProfile, User
 from .payment_pricing import apply_pricing_to_payment_row
-from .teacher_commission import resolve_commission_rate
+from .teacher_commission import teacher_payout_commission_rate
 
 
 @dataclass(frozen=True)
@@ -91,7 +91,7 @@ def _commission_rate_for_enrollment(
         .filter(TeacherProfile.id == enrollment.teacher_id)
         .scalar()
     )
-    return resolve_commission_rate(str(teacher_name or ""), enrollment, billing_month)
+    return teacher_payout_commission_rate(str(teacher_name or ""), enrollment, billing_month)
 
 
 def _last_billing_month_key(enrollment: LessonEnrollment, *, as_of: date) -> Optional[MonthKey]:

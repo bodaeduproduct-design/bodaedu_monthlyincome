@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from .models import MonthlyPaymentRecord, Settlement
 from .payment_pricing import payment_row_collection_amount, per_session_teacher_settlement_gross
+from .teacher_commission import is_company_retained_teacher, teacher_name_by_profile_id, teacher_settlement_gross_basis
 
 
 # 정규·시범 지급: 선생님 몫(세전) × SETTLEMENT_FEE_MULTIPLIER (= 1 - 3.3% 정산 수수료)
@@ -39,6 +40,7 @@ def _safe_int(value) -> int:
 
 def _settlement_gross_for_payment(db: Session, row: MonthlyPaymentRecord) -> int:
     """선생님 정산 집계: 회차별은 진행 회차만, 월별·특이금액은 수납 기준."""
+    teacher_name = teacher_name_by_profile_id(db, int(row.teacher_id or 0))
     unit = str(row.billing_unit or "").strip() or "monthly"
     if unit == "per_session":
         from .session_carryover import carryover_out_sessions_for_month
@@ -48,11 +50,19 @@ def _settlement_gross_for_payment(db: Session, row: MonthlyPaymentRecord) -> int
             enrollment_id=int(row.enrollment_id or 0),
             source_billing_month=str(row.billing_month or ""),
         )
-        return per_session_teacher_settlement_gross(row, carryover_out_sessions=carryover_out)
-    return payment_row_collection_amount(row)
+        gross = per_session_teacher_settlement_gross(row, carryover_out_sessions=carryover_out)
+    else:
+        gross = payment_row_collection_amount(row)
+    return teacher_settlement_gross_basis(teacher_name, gross)
 
 
-def _recalculate_settlement(row: Settlement) -> None:
+def _recalculate_settlement(row: Settlement, db: Optional[Session] = None) -> None:
+    if db is not None and is_company_retained_teacher(teacher_name_by_profile_id(db, int(row.teacher_id or 0))):
+        row.pre_tax_amount = 0
+        row.withholding_amount = 0
+        row.net_amount = 0
+        return
+
     rate = float(row.commission_rate or 60.0)
     gross = _safe_int(row.gross_amount)
     trial = _safe_int(row.trial_fee)
@@ -94,7 +104,12 @@ def sync_settlements_from_payments(
             continue
         key = (int(row.teacher_id), str(row.billing_month), unit)
         gross = _settlement_gross_for_payment(db, row)
-        rate = float(row.commission_rate if row.commission_rate is not None else 60.0)
+        teacher_name = teacher_name_by_profile_id(db, int(row.teacher_id))
+        rate = (
+            0.0
+            if is_company_retained_teacher(teacher_name)
+            else float(row.commission_rate if row.commission_rate is not None else 60.0)
+        )
         row_counts[key] = row_counts.get(key, 0) + 1
         if key not in buckets:
             buckets[key] = SettlementAgg(gross_amount=0, weighted_rate_sum=0.0)
@@ -127,19 +142,26 @@ def sync_settlements_from_payments(
                 settlement_type=unit,
                 gross_amount=agg.gross_amount,
                 trial_fee=0,
-                commission_rate=agg.commission_rate,
+                commission_rate=(
+                    0.0
+                    if is_company_retained_teacher(teacher_name_by_profile_id(db, int(t_id)))
+                    else agg.commission_rate
+                ),
                 withholding_rate=DEFAULT_WITHHOLDING_RATE,
                 status="pending",
             )
-            _recalculate_settlement(row)
+            _recalculate_settlement(row, db)
             db.add(row)
             changed += 1
             continue
 
         before = (row.gross_amount, row.commission_rate, row.pre_tax_amount, row.net_amount)
         row.gross_amount = agg.gross_amount
-        row.commission_rate = agg.commission_rate
-        _recalculate_settlement(row)
+        teacher_name = teacher_name_by_profile_id(db, int(t_id))
+        row.commission_rate = (
+            0.0 if is_company_retained_teacher(teacher_name) else agg.commission_rate
+        )
+        _recalculate_settlement(row, db)
         after = (row.gross_amount, row.commission_rate, row.pre_tax_amount, row.net_amount)
         if before != after:
             changed += 1

@@ -8,6 +8,7 @@ from typing import Any, Optional
 from sqlalchemy.orm import Session
 
 from .models import MonthlyPaymentRecord, SessionCarryover, Settlement, StudentProfile, User
+from .teacher_commission import is_company_retained_teacher, teacher_name_by_profile_id, teacher_settlement_gross_basis
 from .settlement_sync import DEFAULT_WITHHOLDING_RATE, _recalculate_settlement, _safe_int
 
 
@@ -19,8 +20,10 @@ def carryover_gross_amount(carryover: SessionCarryover) -> int:
     return _safe_int(carryover.unit_price) * max(1, _safe_int(carryover.session_count))
 
 
-def carryover_teacher_share(carryover: SessionCarryover) -> int:
+def carryover_teacher_share(carryover: SessionCarryover, db: Optional[Session] = None) -> int:
     gross = carryover_gross_amount(carryover)
+    if db is not None and is_company_retained_teacher(teacher_name_by_profile_id(db, int(carryover.teacher_id))):
+        return 0
     rate = float(carryover.commission_rate or 60.0)
     return int(round(gross * rate / 100.0))
 
@@ -42,10 +45,10 @@ def carryover_out_sessions_for_month(
     return sum(max(0, _safe_int(row.session_count)) for row in rows)
 
 
-def carryover_net_amount(carryover: SessionCarryover) -> int:
+def carryover_net_amount(carryover: SessionCarryover, db: Optional[Session] = None) -> int:
     from .settlement_detail import net_after_settlement_fee
 
-    return net_after_settlement_fee(carryover_teacher_share(carryover))
+    return net_after_settlement_fee(carryover_teacher_share(carryover, db))
 
 
 def list_carryovers_for_teacher_month(
@@ -69,7 +72,7 @@ def list_carryovers_for_teacher_month(
             .filter(StudentProfile.id == row.student_id)
             .scalar()
         )
-        pre_tax = carryover_teacher_share(row)
+        pre_tax = carryover_teacher_share(row, db)
         items.append(
             {
                 "id": row.id,
@@ -83,7 +86,7 @@ def list_carryovers_for_teacher_month(
                 "commission_rate": float(row.commission_rate or 60.0),
                 "gross_amount": carryover_gross_amount(row),
                 "teacher_share": pre_tax,
-                "net_amount": carryover_net_amount(row),
+                "net_amount": carryover_net_amount(row, db),
                 "status": row.status,
                 "memo": row.memo,
             }
@@ -101,7 +104,7 @@ def teacher_carryover_net_total(db: Session, teacher_id: int, settlement_billing
         )
         .all()
     )
-    return sum(carryover_net_amount(row) for row in rows)
+    return sum(carryover_net_amount(row, db) for row in rows)
 
 
 def sync_carryover_settlement(db: Session, carryover: SessionCarryover) -> Settlement:
@@ -119,7 +122,7 @@ def sync_carryover_settlement(db: Session, carryover: SessionCarryover) -> Settl
         status="pending",
     )
     db.add(row)
-    _recalculate_settlement(row)
+    _recalculate_settlement(row, db)
     carryover.status = "settled"
     db.flush()
     return row

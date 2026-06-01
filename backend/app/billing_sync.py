@@ -8,6 +8,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from .models import LessonEnrollment, MonthlyPaymentRecord, Product, Settlement
+from .teacher_commission import is_company_retained_teacher, teacher_name_by_profile_id, teacher_payout_commission_rate
 
 DEFAULT_WITHHOLDING_RATE = 3.3
 TRIAL_FEE_AMOUNT = 10_000
@@ -89,7 +90,13 @@ def _settlement_type_for_product(product: Optional[Product]) -> str:
     return "monthly"
 
 
-def _recalculate_settlement(row: Settlement) -> None:
+def _recalculate_settlement(row: Settlement, db: Optional[Session] = None) -> None:
+    if db is not None and is_company_retained_teacher(teacher_name_by_profile_id(db, int(row.teacher_id or 0))):
+        row.pre_tax_amount = 0
+        row.withholding_amount = 0
+        row.net_amount = 0
+        return
+
     rate = float(row.commission_rate or 60.0)
     gross = int(row.gross_amount or 0)
     trial = int(row.trial_fee or 0)
@@ -136,7 +143,7 @@ def _clear_trial_from_lesson_settlement_rows(db: Session, teacher_id: int, billi
             continue
         if int(row.gross_amount or 0) == 0 and int(row.trial_fee or 0) > 0:
             row.trial_fee = 0
-            _recalculate_settlement(row)
+            _recalculate_settlement(row, db)
 
 
 def _find_lesson_settlement_with_gross(
@@ -195,7 +202,7 @@ def _upsert_teacher_settlement_trial(
     lesson_row = _find_lesson_settlement_with_gross(db, teacher_id, billing_month, lesson_settlement_type)
     if lesson_row:
         lesson_row.trial_fee = trial_total
-        _recalculate_settlement(lesson_row)
+        _recalculate_settlement(lesson_row, db)
         if trial_row:
             db.delete(trial_row)
         return lesson_row
@@ -205,7 +212,7 @@ def _upsert_teacher_settlement_trial(
         trial_row.gross_amount = 0
         if trial_row.commission_rate is None:
             trial_row.commission_rate = commission_rate
-        _recalculate_settlement(trial_row)
+        _recalculate_settlement(trial_row, db)
         return trial_row
 
     trial_row = Settlement(
@@ -218,7 +225,7 @@ def _upsert_teacher_settlement_trial(
         withholding_rate=DEFAULT_WITHHOLDING_RATE,
         status="pending",
     )
-    _recalculate_settlement(trial_row)
+    _recalculate_settlement(trial_row, db)
     db.add(trial_row)
     return trial_row
 
@@ -244,7 +251,8 @@ def sync_enrollment_trial_settlement(
 
     product = db.get(Product, row.product_id) if row.product_id else None
     lesson_settlement_type = _settlement_type_for_product(product)
-    commission_rate = float(row.current_commission_rate or row.base_commission_rate or 60.0)
+    teacher_name = teacher_name_by_profile_id(db, int(row.teacher_id))
+    commission_rate = teacher_payout_commission_rate(teacher_name, row, str(row.trial_month or ""))
 
     months_to_recalc: set[str] = set()
     if row.trial_month:
@@ -315,11 +323,11 @@ def migrate_trial_only_monthly_settlements(db: Session) -> int:
         )
         if existing_trial:
             existing_trial.trial_fee = int(existing_trial.trial_fee or 0) + int(row.trial_fee or 0)
-            _recalculate_settlement(existing_trial)
+            _recalculate_settlement(existing_trial, db)
             db.delete(row)
         else:
             row.settlement_type = TRIAL_SETTLEMENT_TYPE
-            _recalculate_settlement(row)
+            _recalculate_settlement(row, db)
         moved += 1
     return moved
 

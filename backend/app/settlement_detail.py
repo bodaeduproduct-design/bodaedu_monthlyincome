@@ -8,6 +8,13 @@ from sqlalchemy.orm import Session
 
 from .models import LessonEnrollment, MonthlyPaymentRecord, Product, Settlement, StudentProfile, User
 from .payment_pricing import payment_row_collection_amount, per_session_teacher_settlement_gross
+from .teacher_commission import (
+    COMPANY_RETENTION_DISPLAY_RATE,
+    is_company_retained_teacher,
+    resolve_commission_rate,
+    teacher_payout_commission_rate,
+    teacher_settlement_gross_basis,
+)
 from .session_carryover import list_carryovers_for_teacher_month, teacher_carryover_net_total
 from .settlement_sync import (
     DEFAULT_WITHHOLDING_RATE,
@@ -164,7 +171,17 @@ def build_teacher_settlement_detail(
             .filter(LessonEnrollment.id == row.enrollment_id)
             .scalar()
         )
-        rate = _safe_float(row.commission_rate if row.commission_rate is not None else 60.0)
+        enrollment = db.get(LessonEnrollment, int(row.enrollment_id)) if row.enrollment_id else None
+        display_rate = (
+            resolve_commission_rate(teacher_name, enrollment, billing_month)
+            if enrollment
+            else _safe_float(row.commission_rate if row.commission_rate is not None else 60.0)
+        )
+        payout_rate = (
+            teacher_payout_commission_rate(teacher_name, enrollment, billing_month)
+            if enrollment
+            else (0.0 if is_company_retained_teacher(teacher_name) else display_rate)
+        )
         collection_amount = payment_row_collection_amount(row)
         amount = collection_amount
         total_sessions = _safe_int(row.total_sessions)
@@ -173,11 +190,12 @@ def build_teacher_settlement_detail(
         carryover_out = carryover_out_by_enrollment.get(int(row.enrollment_id or 0))
         carryover_in = carryover_in_by_enrollment.get(int(row.enrollment_id or 0))
         carryover_out_sessions = _safe_int(carryover_out["session_count"]) if carryover_out else 0
-        teacher_gross = (
+        teacher_gross_basis = (
             per_session_teacher_settlement_gross(row, carryover_out_sessions=carryover_out_sessions)
             if row.billing_unit == "per_session"
             else collection_amount
         )
+        teacher_gross = teacher_settlement_gross_basis(teacher_name, teacher_gross_basis)
         carryover_in_sessions = _safe_int(carryover_in["session_count"]) if carryover_in else 0
         carryover_share_pre_tax = _safe_int(carryover_in["teacher_share"]) if carryover_in else 0
         carryover_delta, carryover_display = _carryover_delta_display(
@@ -199,10 +217,10 @@ def build_teacher_settlement_detail(
             settlement_session_count = progress_sessions
             settlement_gross_amount = progress_gross_amount
             tuition_gross_amount = collection_amount
-        share = teacher_share_from_payment(teacher_gross, rate)
+        share = teacher_share_from_payment(teacher_gross, payout_rate)
         tuition_gross += collection_amount
         tuition_teacher_share += share
-        weighted_rate_sum += teacher_gross * rate
+        weighted_rate_sum += teacher_gross * payout_rate
         teacher_share_total = share + carryover_share_pre_tax
         regular_payments.append(
             {
@@ -227,7 +245,8 @@ def build_teacher_settlement_detail(
                 "settlement_basis_amount": settlement_gross_amount,
                 "per_session_unit_price": per_session_unit_price,
                 "final_amount": amount,
-                "commission_rate": rate,
+                "commission_rate": display_rate,
+                "payout_commission_rate": payout_rate,
                 "teacher_share": teacher_share_total,
                 "teacher_share_pre_tax": teacher_share_total,
                 "teacher_settlement_gross": teacher_gross,
@@ -251,7 +270,9 @@ def build_teacher_settlement_detail(
             regular_monthly_payments.append(pay_row)
 
     commission_rate = (
-        float(weighted_rate_sum / tuition_gross) if tuition_gross > 0 else 60.0
+        COMPANY_RETENTION_DISPLAY_RATE
+        if is_company_retained_teacher(teacher_name)
+        else (float(weighted_rate_sum / tuition_gross) if tuition_gross > 0 else 60.0)
     )
 
     # 정산 행 → 정규/시범 세전·원천세·순지급 분리
@@ -308,9 +329,10 @@ def build_teacher_settlement_detail(
         .all()
     )
 
+    company_retained = is_company_retained_teacher(teacher_name)
     for enrollment, student_name in trial_enrollments:
         fee = _safe_int(enrollment.trial_fee)
-        pre_tax = fee
+        pre_tax = 0 if company_retained else fee
         w = settlement_fee_from_teacher_share(pre_tax)
         trial_lessons.append(
             {
@@ -383,7 +405,13 @@ def build_teacher_settlement_detail(
                 "tuition_gross": tuition_gross,
                 "commission_rate": round(commission_rate, 2),
                 "teacher_share_pre_tax": regular_tuition_pre_tax,
-                "company_share": max(0, tuition_gross - tuition_teacher_share - carryover_pre_tax),
+                "company_share": max(
+                    0,
+                    tuition_gross
+                    + sum(_safe_int(item["gross_amount"]) for item in carryover_lessons)
+                    - tuition_teacher_share
+                    - carryover_pre_tax,
+                ),
                 "settlement_fee_rate": SETTLEMENT_FEE_RATE,
                 "settlement_fee_multiplier": SETTLEMENT_FEE_MULTIPLIER,
                 "settlement_fee_amount": regular_withholding,
