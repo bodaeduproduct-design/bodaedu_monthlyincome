@@ -5,6 +5,7 @@ __pycache__/
 backend/.venv/
 backend/settlement.db
 backend/boda.db
+boda.db
 boda.db.backup-*
 boda.db.before-git-restore-*
 
